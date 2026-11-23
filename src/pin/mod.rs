@@ -100,6 +100,28 @@ pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::cor
             windows::Win32::Foundation::HINSTANCE(hinstance.0),
             Some(state.cast()),
         )?;
+        // 清除系统附加的 WS_MAXIMIZE 位（启动信息污染，会导致命中测试异常）
+        let cur_style = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-16),
+        );
+        let want_style = cur_style & !0x0100_0000; // WS_MAXIMIZE
+        if want_style != cur_style {
+            windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
+                hwnd,
+                windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-16),
+                want_style,
+            );
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                hwnd,
+                windows::Win32::UI::WindowsAndMessaging::HWND_TOP,
+                0, 0, 0, 0,
+                windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(
+                    0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020, // NOSIZE|NOMOVE|NOZORDER|NOACTIVATE|FRAMECHANGED
+                ),
+            );
+        }
+
         PIN_COUNT.fetch_add(1, Ordering::Relaxed);
         let _ = SetLayeredWindowAttributes(
             hwnd,
@@ -142,6 +164,10 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let state = (*create).lpCreateParams as *mut PinState;
                 windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {
+                // 整窗视为标题栏：拖动由系统原生处理，不依赖自家消息
+                return LRESULT(2); // HTCAPTION
             }
             windows::Win32::UI::WindowsAndMessaging::WM_NCCALCSIZE => {
                 // [实验A] 暂时走默认路径
@@ -220,7 +246,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     if let Some((ox, oy)) = (*st).drag_offset {
                         let mut pt = POINT::default();
                         let _ = GetCursorPos(&mut pt);
-                        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                        let ok = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
                             hwnd,
                             None,
                             pt.x - ox,
@@ -231,6 +257,12 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                                 0x0001 | 0x0004 | 0x0010, // NOSIZE | NOZORDER | NOACTIVATE
                             ),
                         );
+                        crate::logging::info(&format!(
+                            "pin move to ({},{}) ok={}",
+                            pt.x - ox,
+                            pt.y - oy,
+                            ok.is_ok()
+                        ));
                     }
                 }
                 LRESULT(0)
@@ -273,6 +305,11 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         let _ = InvalidateRect(hwnd, None, false);
                     }
                 }
+                LRESULT(0)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_NCRBUTTONUP => {
+                // HTCAPTION 下右键走 NC 消息：弹自定义菜单
+                show_pin_menu(hwnd);
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
