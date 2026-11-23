@@ -9,6 +9,7 @@ mod autostart;
 mod capture;
 mod config;
 mod hotkey;
+mod overlay;
 mod single_instance;
 mod timefmt;
 mod tray;

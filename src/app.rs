@@ -27,6 +27,8 @@ pub const ACTIVATE_SNIP: u32 = WM_APP_BASE + 1;
 pub const TRAY_CALLBACK: u32 = WM_APP_BASE + 2;
 /// 截图热键的 WM_HOTKEY 注册 ID
 pub const HOTKEY_ID_SNIP: u32 = 0xB001;
+/// 覆盖层选区确认完成
+pub const SELECTION_DONE: u32 = WM_APP_BASE + 3;
 
 static MAIN_HWND: OnceLock<isize> = OnceLock::new();
 
@@ -71,8 +73,21 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         }
         WM_HOTKEY => {
             if crate::hotkey::handle_wm_hotkey(wparam, lparam).is_some() {
-                eprintln!("[{}] 热键触发：开始截图", crate::timefmt::now_cn_string());
-                // Task 6 接入覆盖层
+                let _ = crate::overlay::start();
+            }
+            LRESULT(0)
+        }
+        SELECTION_DONE => {
+            if let Some(rect) = crate::overlay::take_selection() {
+                eprintln!(
+                    "[{}] 选区确认: x={} y={} w={} h={}",
+                    crate::timefmt::now_cn_string(),
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height
+                );
+                // Task 7 接入：抓帧写剪贴板
             }
             LRESULT(0)
         }
