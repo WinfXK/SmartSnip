@@ -5,6 +5,7 @@
 //! 创建时间: 2026年11月23日
 
 mod app;
+mod annotate;
 mod autostart;
 mod capture;
 mod clipboard;
