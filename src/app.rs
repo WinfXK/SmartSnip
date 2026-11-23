@@ -79,15 +79,17 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         }
         SELECTION_DONE => {
             if let Some(rect) = crate::overlay::take_selection() {
-                eprintln!(
-                    "[{}] 选区确认: x={} y={} w={} h={}",
-                    crate::timefmt::now_cn_string(),
-                    rect.x,
-                    rect.y,
-                    rect.width,
-                    rect.height
-                );
-                // Task 7 接入：抓帧写剪贴板
+                match crate::capture::capture_region(rect) {
+                    Ok(frame) => {
+                        if let Err(err) = crate::clipboard::copy_frame(&frame) {
+                            eprintln!("[{}] {err}", crate::timefmt::now_cn_string());
+                        } else {
+                            eprintln!("[{}] 已复制到剪贴板", crate::timefmt::now_cn_string());
+                            // Task 9 接入：保留帧供贴图；Task 8 接入标注
+                        }
+                    }
+                    Err(err) => eprintln!("[{}] 截图失败: {err}", crate::timefmt::now_cn_string()),
+                }
             }
             LRESULT(0)
         }
