@@ -20,8 +20,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SET_WINDOW_POS_FLAGS, SetWindowPos, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, GetSystemMetrics, WINDOW_EX_STYLE, WINDOW_STYLE,
     WM_CHAR, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP,
-    WM_SETCURSOR, WNDCLASSW,
+    WM_SETCURSOR, WM_DESTROY, WNDCLASSW,
 };
+
+use std::sync::Mutex;
 
 use crate::capture::{capture_region, virtual_desktop_bounds, Frame, Rect};
 use crate::app::{SELECTION_DONE};
@@ -44,6 +46,8 @@ struct OverlayState {
 }
 
 static mut STATE: Option<OverlayState> = None;
+/// 已确认待消费的选区（桌面物理坐标）；与遮罩状态解耦，避免销毁竞态
+static PENDING_SELECTION: Mutex<Option<Rect>> = Mutex::new(None);
 
 /// 启动一次框选会话；完成后向主窗口投递 SELECTION_DONE（选区存于 `take_selection`）
 pub fn start() -> Result<(), windows::core::Error> {
@@ -106,15 +110,10 @@ pub fn start() -> Result<(), windows::core::Error> {
 
 /// 取出已确认的选区（桌面物理坐标）；一次性消费
 pub fn take_selection() -> Option<Rect> {
-    unsafe {
-        let sel = STATE.as_ref()?.selection?;
-        Some(Rect {
-            x: sel.x + STATE.as_ref().unwrap().origin.0,
-            y: sel.y + STATE.as_ref().unwrap().origin.1,
-            width: sel.width,
-            height: sel.height,
-        })
-    }
+    PENDING_SELECTION
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take()
 }
 
 fn finish(hwnd: HWND) {
@@ -211,6 +210,17 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     .as_ref()
                     .is_some_and(|st| st.drag_start.is_some() && st.selection.is_some());
                 if confirmed {
+                    // 先把选区换算到桌面坐标并暂存，WM_DESTROY 清 STATE 不影响后续取用
+                    let pending = STATE.as_ref().map(|st| {
+                        let sel = st.selection.unwrap();
+                        Rect {
+                            x: sel.x + st.origin.0,
+                            y: sel.y + st.origin.1,
+                            width: sel.width,
+                            height: sel.height,
+                        }
+                    });
+                    *PENDING_SELECTION.lock().unwrap_or_else(|p| p.into_inner()) = pending;
                     let _ = ReleaseCapture();
                     let main = crate::app::main_hwnd();
                     let _ = DestroyWindow(hwnd);
@@ -235,14 +245,13 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let ch = wparam.0 as u32;
                 // Enter 确认全屏选区
                 if ch == 0x0D {
-                    if let Some(st) = STATE.as_mut() {
-                        st.selection = Some(Rect {
-                            x: 0,
-                            y: 0,
-                            width: st.source.width as i32,
-                            height: st.source.height as i32,
-                        });
-                    }
+                    let pending = STATE.as_ref().map(|st| Rect {
+                        x: st.origin.0,
+                        y: st.origin.1,
+                        width: st.source.width as i32,
+                        height: st.source.height as i32,
+                    });
+                    *PENDING_SELECTION.lock().unwrap_or_else(|p| p.into_inner()) = pending;
                     let main = crate::app::main_hwnd();
                     let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
                         main,
@@ -259,7 +268,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         if let Some((r, g, b)) = render::pixel_color(&st.source, cx, cy) {
                             let hex = format!("#{:02X}{:02X}{:02X}", r, g, b);
                             let _ = crate::clipboard::copy_text(&hex);
-                            eprintln!("已复制颜色: {hex}");
+                            crate::dbg_println!("已复制颜色: {hex}");
                         }
                     }
                 }
@@ -303,6 +312,18 @@ impl Frame {
             width: self.width,
             height: self.height,
             data: self.data.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    /// 真机覆盖层创建验证
+    #[test]
+    fn live_overlay_start() {
+        match super::start() {
+            Ok(()) => println!("overlay ok"),
+            Err(e) => println!("overlay failed: {e}"),
         }
     }
 }

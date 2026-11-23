@@ -15,7 +15,7 @@ pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("panic: {info}");
         crate::logging::error(&msg);
-        eprintln!("{msg}");
+        crate::dbg_println!("{msg}");
     }));
 }
 

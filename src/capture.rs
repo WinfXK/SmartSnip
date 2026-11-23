@@ -59,9 +59,25 @@ pub fn capture_region(rect: Rect) -> Result<Frame, windows::core::Error> {
         let bmp = CreateCompatibleBitmap(screen_dc, rect.width, rect.height);
         let old = SelectObject(mem_dc, windows::Win32::Graphics::Gdi::HGDIOBJ(bmp.0));
 
-        let result = capture_region_inner(&screen_dc, &mem_dc, &bmp, rect);
-
+        // GetDIBits 要求位图未被选入任何 DC：先 BitBlt 再解除选中
+        let blt_ok = BitBlt(
+            mem_dc,
+            0,
+            0,
+            rect.width,
+            rect.height,
+            screen_dc,
+            rect.x,
+            rect.y,
+            SRCCOPY | CAPTUREBLT,
+        );
         SelectObject(mem_dc, old);
+        let result = if blt_ok.is_err() {
+            Err(blt_ok.unwrap_err())
+        } else {
+            capture_region_inner(&screen_dc, &bmp, rect)
+        };
+
         let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(bmp.0));
         let _ = DeleteDC(mem_dc);
         let _ = DeleteDC(screen_dc);
@@ -71,23 +87,9 @@ pub fn capture_region(rect: Rect) -> Result<Frame, windows::core::Error> {
 
 unsafe fn capture_region_inner(
     screen_dc: &HDC,
-    mem_dc: &HDC,
     bmp: &HBITMAP,
     rect: Rect,
 ) -> Result<Frame, windows::core::Error> {
-    let ok = BitBlt(
-        *mem_dc,
-        0,
-        0,
-        rect.width,
-        rect.height,
-        *screen_dc,
-        rect.x,
-        rect.y,
-        SRCCOPY | CAPTUREBLT,
-    );
-    ok.map_err(|err| err)?;
-
     let mut bi = BITMAPINFO::default();
     bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
     bi.bmiHeader.biWidth = rect.width;
@@ -98,7 +100,7 @@ unsafe fn capture_region_inner(
 
     let mut frame = Frame::new(rect.width as u32, rect.height as u32);
     let lines = GetDIBits(
-        *mem_dc,
+        *screen_dc,
         *bmp,
         0,
         rect.height as u32,
@@ -149,5 +151,23 @@ mod tests {
         let r = Rect { x: 0, y: 0, width: 0, height: 0 };
         // 不做真捕获，仅验证尺寸边界不会 panic
         assert_eq!(r.width, 0);
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// 真机抓取验证（需有显示环境）
+    #[test]
+    fn live_capture_small_region() {
+        let r = Rect { x: 0, y: 0, width: 100, height: 100 };
+        match capture_region(r) {
+            Ok(f) => {
+                assert_eq!(f.data.len(), 100 * 100 * 4);
+                println!("capture ok, first px={:?}", &f.data[0..4]);
+            }
+            Err(e) => println!("capture failed: {e}"),
+        }
     }
 }

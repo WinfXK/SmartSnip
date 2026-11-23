@@ -35,7 +35,7 @@ fn main() {
         }
     };
     if let Err(err) = app::run() {
-        eprintln!("SmartSnip 启动失败: {err}");
+        crate::dbg_println!("SmartSnip 启动失败: {err}");
         std::process::exit(1);
     }
 }

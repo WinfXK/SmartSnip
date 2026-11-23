@@ -110,7 +110,7 @@ impl ConfigStore {
             Ok(text) => match toml::from_str::<Config>(&text) {
                 Ok(cfg) => cfg,
                 Err(err) => {
-                    eprintln!("配置解析失败({err})，已备份并重建默认配置");
+                    crate::dbg_println!("配置解析失败({err})，已备份并重建默认配置");
                     self.backup_broken(&path);
                     self.save(&Config::default());
                     Config::default()

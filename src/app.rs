@@ -142,7 +142,7 @@ pub fn run() -> Result<()> {
         )
         ?;        let _ = MAIN_HWND.set(hwnd.0 as isize);
         if let Err(err) = crate::tray::init(hwnd) {
-            eprintln!("托盘初始化失败: {err}");
+            crate::dbg_println!("托盘初始化失败: {err}");
         }
         register_startup_hotkey(hwnd);
 

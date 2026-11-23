@@ -115,7 +115,7 @@ pub fn handle_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> O
             menu::SNIP_NOW => unsafe {
                 let _ = PostMessageW(hwnd, ACTIVATE_SNIP, WPARAM(0), LPARAM(0));
             },
-            menu::SETTINGS => eprintln!("[{}] 打开设置窗口（Task 13 实现）", crate::timefmt::now_cn_string()),
+            menu::SETTINGS => crate::dbg_println!("[{}] 打开设置窗口（Task 13 实现）", crate::timefmt::now_cn_string()),
             menu::OPEN_CONFIG_DIR => {
                 let dir = crate::config::ConfigStore::standard_dir();
                 let _ = std::fs::create_dir_all(&dir);
@@ -128,7 +128,7 @@ pub fn handle_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> O
                     crate::autostart::enable()
                 };
                 if let Err(err) = result {
-                    eprintln!("自启切换失败: {err}");
+                    crate::dbg_println!("自启切换失败: {err}");
                 }
             }
             menu::EXIT => unsafe {

@@ -57,6 +57,21 @@ fn write_line(level: &str, msg: &str) {
     *slot = Some(dir);
 }
 
+/// 窗口子系统下 stderr 可能无效：release 版调试输出转日志，debug 版保留控制台
+#[macro_export]
+macro_rules! dbg_println {
+    ($($arg:tt)*) => {{
+        #[cfg(debug_assertions)]
+        {
+            eprintln!($($arg)*);
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            $crate::logging::info(&format!($($arg)*));
+        }
+    }};
+}
+
 /// 清理超过保留期的日志文件
 fn cleanup_expired(dir: &std::path::Path) {
     let cutoff = timefmt::now_cn().date_naive() - chrono::Duration::days(KEEP_DAYS as i64);

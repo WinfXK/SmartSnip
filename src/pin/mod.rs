@@ -54,7 +54,7 @@ fn can_create() -> bool {
 /// 创建贴图窗口；`screen_pos` 为桌面物理坐标
 pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::core::Error> {
     if !can_create() {
-        eprintln!("贴图数量已达上限（{MAX_PINS}）");
+        crate::dbg_println!("贴图数量已达上限（{MAX_PINS}）");
         return Err(windows::core::Error::from_win32());
     }
     unsafe {
@@ -220,7 +220,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         let st = state_from(hwnd);
                         if !st.is_null() {
                             if let Err(err) = crate::clipboard::copy_frame(&(*st).frame) {
-                                eprintln!("{err}");
+                                crate::dbg_println!("{err}");
                             }
                         }
                     }
@@ -229,9 +229,9 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         if !st.is_null() {
                             let path = crate::clipboard::default_save_path();
                             if let Err(err) = crate::clipboard::save_frame_png(&(*st).frame, &path) {
-                                eprintln!("{err}");
+                                crate::dbg_println!("{err}");
                             } else {
-                                eprintln!("已保存: {}", path.display());
+                                crate::dbg_println!("已保存: {}", path.display());
                             }
                         }
                     }
