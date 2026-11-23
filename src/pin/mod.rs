@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, InvalidateRect, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER,
+    BeginPaint, EndPaint, InvalidateRect, StretchDIBits, PatBlt, BITMAPINFO, BITMAPINFOHEADER,
     DIB_RGB_COLORS, PAINTSTRUCT, SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -21,8 +21,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW,
 };
 
+use windows::Win32::Graphics::Gdi::PATCOPY;
 use crate::capture::Frame;
 use crate::app::{PIN_CLOSED};
+
+const PATCOPY_PIN: windows::Win32::Graphics::Gdi::ROP_CODE = windows::Win32::Graphics::Gdi::ROP_CODE(PATCOPY.0);
 
 const CLASS_NAME: &str = "SmartSnip_PinWindow";
 /// 贴图数量上限（防失控）
@@ -175,12 +178,30 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         (*st).frame.width as i32, (*st).frame.height as i32,
                         Some((*st).frame.data.as_ptr().cast()), &bi, DIB_RGB_COLORS, SRCCOPY,
                     );
+                    // 1px 反色边框：取左上角像素取反，保证任何底色都可辨
+                    let px = &(*st).frame.data;
+                    let (r, g, b) = (px[2], px[1], px[0]);
+                    let edge = COLORREF((!r) as u32 | ((!g) as u32) << 8 | ((!b) as u32) << 16);
+                    let brush = windows::Win32::Graphics::Gdi::CreateSolidBrush(edge);
+                    let old = windows::Win32::Graphics::Gdi::SelectObject(
+                        hdc,
+                        windows::Win32::Graphics::Gdi::HGDIOBJ(brush.0),
+                    );
+                    let _ = PatBlt(hdc, 0, 0, disp_w, 1, PATCOPY_PIN);
+                    let _ = PatBlt(hdc, 0, disp_h - 1, disp_w, 1, PATCOPY_PIN);
+                    let _ = PatBlt(hdc, 0, 0, 1, disp_h, PATCOPY_PIN);
+                    let _ = PatBlt(hdc, disp_w - 1, 0, 1, disp_h, PATCOPY_PIN);
+                    windows::Win32::Graphics::Gdi::SelectObject(hdc, old);
+                    let _ = windows::Win32::Graphics::Gdi::DeleteObject(
+                        windows::Win32::Graphics::Gdi::HGDIOBJ(brush.0),
+                    );
                     let _ = EndPaint(hwnd, &ps);
                 }
                 LRESULT(0)
             }
             WM_LBUTTONDOWN => {
                 // 手动拖动：记录光标相对窗口偏移并捕获鼠标
+                crate::logging::info("pin down");
                 let st = state_from(hwnd);
                 if !st.is_null() {
                     let mut pt = POINT::default();

@@ -8,7 +8,7 @@
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::Shell::{
     NOTIFY_ICON_DATA_FLAGS, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW, Shell_NotifyIconW, NIF_ICON,
-    NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION,
+    NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW, PostMessageW,
@@ -46,12 +46,11 @@ pub fn init(hwnd: HWND) -> Result<(), windows::core::Error> {
             nid.szTip[i] = c;
         }
         if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
-            return Err(windows::core::Error::from_win32());
+            let err = windows::core::Error::from_win32();
+            crate::logging::error(&format!("托盘图标注册失败: {err}"));
+            return Err(err);
         }
-        nid.Anonymous.uVersion = 4;
-        if !Shell_NotifyIconW(NIM_SETVERSION, &nid).as_bool() {
-            return Err(windows::core::Error::from_win32());
-        }
+        // v0 回调语义：lparam 即鼠标消息（兼容性最好）
         NOTIFY_ICON = Some(nid);
     }
     Ok(())
@@ -98,8 +97,8 @@ pub fn show_context_menu(hwnd: HWND) {
 pub fn handle_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
     if msg == TRAY_CALLBACK {
         unsafe {
-            // NOTIFY_ICON_VERSION(4)：事件在 lParam 低 16 位
-            match (lparam.0 & 0xFFFF) as u32 {
+            // v0 回调语义：lparam 直接是鼠标消息
+            match lparam.0 as u32 {
                 x if x == WM_LBUTTONUP => {
                     let _ = PostMessageW(hwnd, ACTIVATE_SNIP, WPARAM(0), LPARAM(0));
                 }
