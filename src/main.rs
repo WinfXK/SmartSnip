@@ -23,6 +23,7 @@ mod scheduler;
 mod single_instance;
 mod timefmt;
 mod tray;
+mod ui;
 
 fn main() {
     scheduler::install_panic_hook();

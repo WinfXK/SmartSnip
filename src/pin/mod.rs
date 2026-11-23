@@ -140,6 +140,22 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
+            windows::Win32::UI::WindowsAndMessaging::WM_NCCALCSIZE => {
+                // 保留客户区 = 全窗口，彻底去掉 1px 非客户区边框
+                if wparam.0 != 0 {
+                    LRESULT(0)
+                } else {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_CAPTURECHANGED => {
+                // 捕获被夺走时复位拖动态，防止鼠标事件全部被贴图吞掉
+                let st = state_from(hwnd);
+                if !st.is_null() {
+                    (*st).drag_offset = None;
+                }
+                LRESULT(0)
+            }
             WM_PAINT => {
                 let st = state_from(hwnd);
                 if !st.is_null() {

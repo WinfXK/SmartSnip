@@ -93,6 +93,8 @@ unsafe fn frame_to_dc(frame: &crate::capture::Frame, hdc_screen: HDC) -> (HDC, H
 /// 启动一次框选会话；完成后向主窗口投递 SELECTION_DONE
 pub fn start() -> Result<(), windows::core::Error> {
     unsafe {
+        // 同一线程：清除贴图等窗口可能遗留的鼠标捕获，避免遮罩收不到鼠标
+        let _ = ReleaseCapture();
         let bounds = virtual_desktop_bounds();
         let source = capture_region(bounds)?;
         let dimmed = render::dim_global(&source);
@@ -375,8 +377,9 @@ unsafe fn handle_toolbar_action(hwnd: HWND, action: u32) {
         toolbar::action::PIN => {
             match capture_region(desktop) {
                 Ok(frame) => {
-                    if let Err(err) = crate::pin::create(frame, (desktop.x, desktop.y)) {
-                        crate::logging::error(&format!("贴图失败: {err}"));
+                    match crate::pin::create(frame, (desktop.x, desktop.y)) {
+                        Ok(_) => crate::logging::info("贴图已创建"),
+                        Err(err) => crate::logging::error(&format!("贴图失败: {err}")),
                     }
                 }
                 Err(err) => crate::logging::error(&format!("截图失败: {err}")),

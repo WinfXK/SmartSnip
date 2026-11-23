@@ -7,8 +7,10 @@
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, EndPaint, FillRect, InvalidateRect, SetBkMode, SetTextColor,
-    DrawTextW, HBRUSH, PAINTSTRUCT, DT_CENTER, DT_SINGLELINE, DT_VCENTER, TRANSPARENT,
+    BeginPaint, CreateFontW, CreateSolidBrush, EndPaint, FillRect, InvalidateRect, SelectObject,
+    SetBkMode, SetTextColor, DrawTextW, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+    DEFAULT_CHARSET, DT_CENTER, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_NORMAL,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -143,6 +145,26 @@ fn action_for(i: i32) -> u32 {
     }
 }
 
+unsafe fn make_font() -> windows::Win32::Graphics::Gdi::HFONT {
+    let name = windows::core::HSTRING::from("Microsoft YaHei UI");
+    CreateFontW(
+        15,
+        0,
+        0,
+        0,
+        FW_NORMAL.0 as i32,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET.0 as u32,
+        OUT_DEFAULT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32,
+        CLEARTYPE_QUALITY.0 as u32,
+        FF_DONTCARE.0 as u32,
+        windows::core::PCWSTR(name.as_ptr()),
+    )
+}
+
 extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         match msg {
@@ -156,6 +178,8 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 );
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, TEXT_COLOR);
+                let font = make_font();
+                let old_font = SelectObject(hdc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0));
                 for (i, label) in LABELS.iter().enumerate() {
                     let r = btn_rect(i as i32);
                     let fill = if HOVER == i as i32 { HOVER_COLOR } else { BTN_COLOR };
@@ -174,6 +198,10 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                     );
                 }
+                SelectObject(hdc, old_font);
+                let _ = windows::Win32::Graphics::Gdi::DeleteObject(
+                    windows::Win32::Graphics::Gdi::HGDIOBJ(font.0),
+                );
                 let _ = EndPaint(hwnd, &ps);
                 LRESULT(0)
             }
