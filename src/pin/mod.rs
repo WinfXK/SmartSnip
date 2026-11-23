@@ -41,6 +41,8 @@ struct PinState {
     scale_x100: i32,
     /// 不透明度 0~255
     alpha: u8,
+    /// 拖动中：光标相对窗口左上角的偏移
+    drag_offset: Option<(i32, i32)>,
 }
 
 /// 每个窗口对应一份状态，通过 GWLP_USERDATA 关联
@@ -78,13 +80,14 @@ pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::cor
             frame,
             scale_x100: 100,
             alpha: 255,
+            drag_offset: None,
         }));
 
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0x0000_0020 | 0x0000_0080 | 0x0008_0000), // TOPMOST | TOOLWINDOW | LAYERED
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::w!("SmartSnip Pin"),
-            WINDOW_STYLE(0x8000_0000 | 0x0040_0000), // WS_POPUP | WS_SYSMENU(供 Alt+F4)
+            WINDOW_STYLE(0x8000_0000), // WS_POPUP（无边框，无白色描边）
             screen_pos.0,
             screen_pos.1,
             (*state).frame.width as i32,
@@ -161,14 +164,45 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 LRESULT(0)
             }
             WM_LBUTTONDOWN => {
-                // 任意位置拖动移动窗口
-                let _ = ReleaseCapture2(hwnd);
-                let _ = windows::Win32::UI::WindowsAndMessaging::SendMessageW(
-                    hwnd,
-                    windows::Win32::UI::WindowsAndMessaging::WM_NCLBUTTONDOWN,
-                    WPARAM(2), // HTCAPTION
-                    lparam,
-                );
+                // 手动拖动：记录光标相对窗口偏移并捕获鼠标
+                let st = state_from(hwnd);
+                if !st.is_null() {
+                    let mut pt = POINT::default();
+                    let _ = GetCursorPos(&mut pt);
+                    let mut wr = RECT::default();
+                    let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut wr);
+                    (*st).drag_offset = Some((pt.x - wr.left, pt.y - wr.top));
+                    let _ = SetCapturePin(hwnd);
+                }
+                LRESULT(0)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_MOUSEMOVE => {
+                let st = state_from(hwnd);
+                if !st.is_null() {
+                    if let Some((ox, oy)) = (*st).drag_offset {
+                        let mut pt = POINT::default();
+                        let _ = GetCursorPos(&mut pt);
+                        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                            hwnd,
+                            None,
+                            pt.x - ox,
+                            pt.y - oy,
+                            0,
+                            0,
+                            windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(
+                                0x0001 | 0x0004 | 0x0010, // NOSIZE | NOZORDER | NOACTIVATE
+                            ),
+                        );
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                let st = state_from(hwnd);
+                if !st.is_null() {
+                    (*st).drag_offset = None;
+                }
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
                 LRESULT(0)
             }
             WM_MOUSEWHEEL => {
@@ -283,10 +317,10 @@ fn show_pin_menu(hwnd: HWND) {
     }
 }
 
-/// SetCapture/ReleaseCapture 别名收口
+/// SetCapture 收口
 #[allow(non_snake_case)]
-fn ReleaseCapture2(_: HWND) -> windows::core::Result<()> {
-    unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() }
+fn SetCapturePin(hwnd: HWND) -> HWND {
+    unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(hwnd) }
 }
 
 // 屏幕尺寸保留用于默认落位越界修正（M4 打磨）

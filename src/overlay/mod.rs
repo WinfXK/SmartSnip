@@ -521,13 +521,16 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let (x, y) = unpack_xy(lparam);
                 if let Some(st) = STATE.as_mut() {
                     st.cursor = (x, y);
-                    if let Some((sx, sy)) = st.drag_start {
-                        st.selection = Some(Rect {
-                            x: sx.min(x),
-                            y: sy.min(y),
-                            width: (sx - x).abs().max(1),
-                            height: (sy - y).abs().max(1),
-                        });
+                    // 选区只在按住拖拽期间更新；pending 态（已松开）不跟随鼠标
+                    if !st.pending {
+                        if let Some((sx, sy)) = st.drag_start {
+                            st.selection = Some(Rect {
+                                x: sx.min(x),
+                                y: sy.min(y),
+                                width: (sx - x).abs().max(1),
+                                height: (sy - y).abs().max(1),
+                            });
+                        }
                     }
                 }
                 redraw();
@@ -537,6 +540,10 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let confirmed = STATE
                     .as_ref()
                     .is_some_and(|st| st.drag_start.is_some() && st.selection.is_some());
+                // 拖拽结束：清空 drag_start，选区从此刻定格
+                if let Some(st) = STATE.as_mut() {
+                    st.drag_start = None;
+                }
                 if confirmed {
                     // 选区确认：进入 pending 模式，弹出工具条等待动作选择
                     let _ = ReleaseCapture();
