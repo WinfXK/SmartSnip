@@ -90,10 +90,10 @@ pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::cor
         }));
 
         let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0x0000_0008 | 0x0000_0080 | if std::env::var("PIN_NO_LAYERED").is_err() { 0x0008_0000 } else { 0 }), // WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED
+            WINDOW_EX_STYLE(0x0000_0008 | 0x0000_0080), // WS_EX_TOPMOST | WS_EX_TOOLWINDOW
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::w!("SmartSnip Pin"),
-            WINDOW_STYLE(0x8000_0000), // WS_POPUP（无边框，无白色描边）
+            WINDOW_STYLE(0x1000_0000), // WS_VISIBLE（本构建对可见 WS_POPUP 强加 WS_MAXIMIZE，禁用拖动；改用普通窗口形态）
             screen_pos.0,
             screen_pos.1,
             (*state).frame.width as i32,
@@ -103,37 +103,74 @@ pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::cor
             windows::Win32::Foundation::HINSTANCE(hinstance.0),
             Some(state.cast()),
         )?;
-        // 清除系统附加的 WS_MAXIMIZE 位（启动信息污染，会导致命中测试异常）
-        let cur_style = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
-            hwnd,
-            windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-16),
-        );
-        let want_style = cur_style & !0x0100_0000; // WS_MAXIMIZE
-        if want_style != cur_style {
-            windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
-                hwnd,
-                windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-16),
-                want_style,
-            );
-            let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
-                hwnd,
-                windows::Win32::UI::WindowsAndMessaging::HWND_TOP,
-                0, 0, 0, 0,
-                windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(
-                    0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020, // NOSIZE|NOMOVE|NOZORDER|NOACTIVATE|FRAMECHANGED
-                ),
-            );
+        {
+            let mut si = windows::Win32::System::Threading::STARTUPINFOW::default();
+            windows::Win32::System::Threading::GetStartupInfoW(&mut si);
+            crate::logging::info(&format!(
+                "startupinfo showWindow={} flags={}",
+                si.wShowWindow, si.dwFlags.0
+            ));
         }
-
         PIN_COUNT.fetch_add(1, Ordering::Relaxed);
         // 登记存活贴图，供遮罩启动时压序
         PIN_REGISTRY.lock().unwrap_or_else(|p| p.into_inner()).push(hwnd.0 as isize);
+        crate::logging::info(&format!(
+            "bisect-registry style=0x{:X}",
+            windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+                hwnd,
+                windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-16)
+            )
+        ));
         let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
             hwnd,
             windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST,
             0, 0, 0, 0,
-            windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(0x0001 | 0x0002 | 0x0040), // NOSIZE | NOMOVE | SHOWWINDOW
+            windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(0x0001 | 0x0002), // NOSIZE | NOMOVE
         );
+
+        crate::logging::info(&format!(
+            "bisect-show style=0x{:X}",
+            windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+                hwnd,
+                windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-16)
+            )
+        ));
+        // 显示调用后再清一次 WS_MAXIMIZE（显示动作可能重新套用启动信息状态），
+        // 并按预期几何复位，防止最大化几何污染命中测试
+        // 复位窗口 placement（最大化状态会让系统忽略 HTCAPTION 拖动）
+        let mut wp = windows::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT::default();
+        wp.length = std::mem::size_of::<windows::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT>()
+            as u32;
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowPlacement(hwnd, &mut wp);
+        wp.showCmd = 1;
+        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPlacement(hwnd, &wp);
+        let cur_style = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-16),
+        );
+        windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-16),
+            cur_style & !0x0100_0000,
+        );
+        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::HWND_TOP,
+            screen_pos.0,
+            screen_pos.1,
+            (*state).frame.width as i32,
+            (*state).frame.height as i32,
+            windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(
+                0x0004 | 0x0010 | 0x0020, // NOZORDER | NOACTIVATE | FRAMECHANGED
+            ),
+        );
+        crate::logging::info(&format!(
+            "bisect-placement style=0x{:X}",
+            windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+                hwnd,
+                windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-16)
+            )
+        ));
         Ok(hwnd)
     }
 }
@@ -182,6 +219,8 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let create = lparam.0 as *mut windows::Win32::UI::WindowsAndMessaging::CREATESTRUCTW;
                 let state = (*create).lpCreateParams as *mut PinState;
                 windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize);
+                // 剥离启动信息附加的 WS_MAXIMIZE，避免最大化状态毒化命中与拖动
+                (*create).style &= !0x0100_0000;
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {

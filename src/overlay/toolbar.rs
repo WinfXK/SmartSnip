@@ -94,7 +94,7 @@ pub fn show(overlay_hwnd: HWND, selection_desktop: Rect) -> Result<HWND, windows
             WINDOW_EX_STYLE(0x0000_0008 | 0x0000_0080), // WS_EX_TOPMOST | WS_EX_TOOLWINDOW
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::w!(""),
-            WINDOW_STYLE(0x8000_0000), // WS_POPUP
+            WINDOW_STYLE(0x1000_0000), // WS_VISIBLE（避开 WS_POPUP 强制最大化怪癖）
             x,
             y,
             w,
