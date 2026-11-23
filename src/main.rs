@@ -14,6 +14,7 @@ mod hotkey;
 mod ocr;
 mod overlay;
 mod pin;
+mod qrcode;
 mod single_instance;
 mod timefmt;
 mod tray;
