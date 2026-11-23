@@ -14,7 +14,7 @@ use windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, RegisterClassW,
     TranslateMessage, CW_USEDEFAULT, DestroyWindow, MSG, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_DESTROY, WM_HOTKEY, WNDCLASSW,
+    WM_DESTROY, WM_HOTKEY, WM_CLOSE, WNDCLASSW,
 };
 
 /// 主窗口类名，进程内唯一
@@ -61,7 +61,7 @@ fn register_startup_hotkey(hwnd: HWND) {
 
 static HOTKEY_HANDLE: OnceLock<crate::hotkey::RegisteredHotKey> = OnceLock::new();
 
-extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+pub extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_DESTROY => {
             crate::tray::shutdown();
@@ -69,7 +69,6 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             LRESULT(0)
         }
         ACTIVATE_SNIP => {
-            // 唤醒动作：Task 6 接入覆盖层后在此触发一次截图
             eprintln!("[{}] 唤醒既有实例：触发截图", crate::timefmt::now_cn_string());
             LRESULT(0)
         }
@@ -84,28 +83,21 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 match crate::capture::capture_region(rect) {
                     Ok(frame) => {
                         if let Err(err) = crate::clipboard::copy_frame(&frame) {
-                            eprintln!("[{}] {err}", crate::timefmt::now_cn_string());
+                            crate::logging::error(&err);
                         } else {
-                            eprintln!("[{}] 已复制到剪贴板", crate::timefmt::now_cn_string());
-                            // Task 9 接入：保留帧供贴图；Task 8 接入标注
+                            crate::logging::info("已复制到剪贴板");
                         }
                     }
-                    Err(err) => eprintln!("[{}] 截图失败: {err}", crate::timefmt::now_cn_string()),
+                    Err(err) => crate::logging::error(&format!("截图失败: {err}")),
                 }
             }
             LRESULT(0)
         }
         WM_CLOSE => unsafe {
-            // 主窗口不可见，托盘「退出」即销毁；后续可见设置窗口单独处理
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
             LRESULT(0)
         },
-        _ => {
-            if let Some(handled) = crate::tray::handle_message(hwnd, msg, wparam, lparam) {
-                return handled;
-            }
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
@@ -132,17 +124,17 @@ pub fn run() -> Result<()> {
             WINDOW_EX_STYLE(0),
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::w!("SmartSnip"),
-            WINDOW_STYLE(0),
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
+            WINDOW_STYLE(0x00C0_0000),
+            0,
+            0,
+            200,
+            100,
             None,
             None,
             windows::Win32::Foundation::HINSTANCE(hinstance.0),
             None,
-        )?;
-        let _ = MAIN_HWND.set(hwnd.0 as isize);
+        )
+        ?;        let _ = MAIN_HWND.set(hwnd.0 as isize);
         if let Err(err) = crate::tray::init(hwnd) {
             eprintln!("托盘初始化失败: {err}");
         }
