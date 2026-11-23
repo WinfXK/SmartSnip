@@ -11,6 +11,7 @@ mod capture;
 mod clipboard;
 mod config;
 mod hotkey;
+mod ocr;
 mod overlay;
 mod pin;
 mod single_instance;
