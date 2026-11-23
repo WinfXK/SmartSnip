@@ -232,8 +232,9 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 LRESULT(0)
             }
             WM_CHAR => {
+                let ch = wparam.0 as u32;
                 // Enter 确认全屏选区
-                if wparam.0 as u32 == 0x0D {
+                if ch == 0x0D {
                     if let Some(st) = STATE.as_mut() {
                         st.selection = Some(Rect {
                             x: 0,
@@ -249,6 +250,18 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         WPARAM(0),
                         LPARAM(0),
                     );
+                } else if ch == b'c' as u32 || ch == b'C' as u32 {
+                    // 颜色拾取：复制光标处 HEX（不截屏退出）
+                    let mut pt = POINT::default();
+                    let _ = GetCursorPos(&mut pt);
+                    if let Some(st) = STATE.as_ref() {
+                        let (cx, cy) = (pt.x - st.origin.0, pt.y - st.origin.1);
+                        if let Some((r, g, b)) = render::pixel_color(&st.source, cx, cy) {
+                            let hex = format!("#{:02X}{:02X}{:02X}", r, g, b);
+                            let _ = crate::clipboard::copy_text(&hex);
+                            eprintln!("已复制颜色: {hex}");
+                        }
+                    }
                 }
                 LRESULT(0)
             }

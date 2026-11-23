@@ -15,11 +15,15 @@ mod ocr;
 mod overlay;
 mod pin;
 mod qrcode;
+mod logging;
+mod scheduler;
 mod single_instance;
 mod timefmt;
 mod tray;
 
 fn main() {
+    scheduler::install_panic_hook();
+    logging::init(&config::ConfigStore::standard_dir());
     let _single = match single_instance::acquire() {
         Ok(instance) => instance,
         Err(_) => {
