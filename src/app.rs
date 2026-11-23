@@ -116,6 +116,9 @@ pub extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                 handle_ocr_result();
                 return LRESULT(0);
             }
+            if let Some(handled) = crate::tray::handle_message(hwnd, msg, wparam, lparam) {
+                return handled;
+            }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
     }

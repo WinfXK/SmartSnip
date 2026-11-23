@@ -87,7 +87,7 @@ pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::cor
         }));
 
         let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0x0000_0008 | 0x0000_0080 | 0x0008_0000), // WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED
+            WINDOW_EX_STYLE(0x0000_0008 | 0x0000_0080 | if std::env::var("PIN_NO_LAYERED").is_err() { 0x0008_0000 } else { 0 }), // WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::w!("SmartSnip Pin"),
             WINDOW_STYLE(0x8000_0000), // WS_POPUP（无边框，无白色描边）
@@ -144,8 +144,10 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             windows::Win32::UI::WindowsAndMessaging::WM_NCCALCSIZE => {
-                // 保留客户区 = 全窗口，彻底去掉 1px 非客户区边框
-                if wparam.0 != 0 {
+                // [实验A] 暂时走默认路径
+                if std::env::var("PIN_KEEP_BORDER").is_ok() {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                } else if wparam.0 != 0 {
                     LRESULT(0)
                 } else {
                     DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -201,7 +203,6 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             }
             WM_LBUTTONDOWN => {
                 // 手动拖动：记录光标相对窗口偏移并捕获鼠标
-                crate::logging::info("pin down");
                 let st = state_from(hwnd);
                 if !st.is_null() {
                     let mut pt = POINT::default();
