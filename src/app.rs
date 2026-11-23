@@ -21,6 +21,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 pub const MAIN_WINDOW_CLASS: &str = "SmartSnip_MainWindow";
 /// 自定义消息基址，各模块通过 `WM_APP + n` 通信
 pub const WM_APP_BASE: u32 = 0x8000;
+/// 二次启动唤醒既有实例：触发一次截图
+pub const ACTIVATE_SNIP: u32 = WM_APP_BASE + 1;
 
 static MAIN_HWND: OnceLock<isize> = OnceLock::new();
 
@@ -37,6 +39,11 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
     match msg {
         WM_DESTROY => {
             unsafe { windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0) };
+            LRESULT(0)
+        }
+        ACTIVATE_SNIP => {
+            // 唤醒动作：Task 6 接入覆盖层后在此触发一次截图
+            eprintln!("[{}] 唤醒既有实例：触发截图", crate::timefmt::now_cn_string());
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },

@@ -6,9 +6,17 @@
 
 mod app;
 mod config;
+mod single_instance;
 mod timefmt;
 
 fn main() {
+    let _single = match single_instance::acquire() {
+        Ok(instance) => instance,
+        Err(_) => {
+            // 已唤醒既有实例，静默退出
+            return;
+        }
+    };
     if let Err(err) = app::run() {
         eprintln!("SmartSnip 启动失败: {err}");
         std::process::exit(1);
