@@ -6,6 +6,7 @@
 
 mod app;
 mod autostart;
+mod capture;
 mod config;
 mod hotkey;
 mod single_instance;
