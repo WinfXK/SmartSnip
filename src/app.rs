@@ -14,7 +14,7 @@ use windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, RegisterClassW,
     TranslateMessage, CW_USEDEFAULT, DestroyWindow, MSG, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_DESTROY, WNDCLASSW,
+    WM_DESTROY, WM_HOTKEY, WNDCLASSW,
 };
 
 /// 主窗口类名，进程内唯一
@@ -25,6 +25,8 @@ pub const WM_APP_BASE: u32 = 0x8000;
 pub const ACTIVATE_SNIP: u32 = WM_APP_BASE + 1;
 /// 托盘图标回调消息
 pub const TRAY_CALLBACK: u32 = WM_APP_BASE + 2;
+/// 截图热键的 WM_HOTKEY 注册 ID
+pub const HOTKEY_ID_SNIP: u32 = 0xB001;
 
 static MAIN_HWND: OnceLock<isize> = OnceLock::new();
 
@@ -37,6 +39,24 @@ pub fn main_hwnd() -> HWND {
 const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: DPI_AWARENESS_CONTEXT =
     DPI_AWARENESS_CONTEXT(-4isize as *mut _);
 
+/// 启动时按配置注册截图热键；注册进程生命周期持有
+fn register_startup_hotkey(hwnd: HWND) {
+    let store = crate::config::ConfigStore::new(crate::config::ConfigStore::standard_dir());
+    let cfg = store.load();
+    let combo = crate::hotkey::HotKeyCombo {
+        modifiers: cfg.hotkey.modifiers.clone(),
+        key: cfg.hotkey.key.clone(),
+    };
+    match crate::hotkey::RegisteredHotKey::register(hwnd, &combo) {
+        Ok(hk) => {
+            let _ = HOTKEY_HANDLE.set(hk);
+        }
+        Err(err) => eprintln!("热键注册失败({err})，请在设置中更换快捷键"),
+    }
+}
+
+static HOTKEY_HANDLE: OnceLock<crate::hotkey::RegisteredHotKey> = OnceLock::new();
+
 extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_DESTROY => {
@@ -47,6 +67,13 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         ACTIVATE_SNIP => {
             // 唤醒动作：Task 6 接入覆盖层后在此触发一次截图
             eprintln!("[{}] 唤醒既有实例：触发截图", crate::timefmt::now_cn_string());
+            LRESULT(0)
+        }
+        WM_HOTKEY => {
+            if crate::hotkey::handle_wm_hotkey(wparam, lparam).is_some() {
+                eprintln!("[{}] 热键触发：开始截图", crate::timefmt::now_cn_string());
+                // Task 6 接入覆盖层
+            }
             LRESULT(0)
         }
         WM_CLOSE => unsafe {
@@ -100,6 +127,7 @@ pub fn run() -> Result<()> {
         if let Err(err) = crate::tray::init(hwnd) {
             eprintln!("托盘初始化失败: {err}");
         }
+        register_startup_hotkey(hwnd);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {

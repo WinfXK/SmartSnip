@@ -7,6 +7,7 @@
 mod app;
 mod autostart;
 mod config;
+mod hotkey;
 mod single_instance;
 mod timefmt;
 mod tray;
