@@ -111,7 +111,7 @@ pub fn start() -> Result<(), windows::core::Error> {
         RegisterClassW(&wc);
 
         let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0x0000_0008 | 0x0000_0080 | 0x0008_0000), // WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED
+            WINDOW_EX_STYLE(0x0000_0008 | 0x0000_0080), // WS_EX_TOPMOST | WS_EX_TOOLWINDOW
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::w!(""),
             WINDOW_STYLE(0x8000_0000), // WS_POPUP

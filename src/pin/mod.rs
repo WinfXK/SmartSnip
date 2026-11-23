@@ -6,6 +6,7 @@
 //! 滚轮缩放（0.2x~5x）、Ctrl+滚轮透明度（40%~100%）、多实例、即用即毁。
 
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -35,6 +36,8 @@ const MIN_SCALE_X100: i32 = 20;
 const MAX_SCALE_X100: i32 = 500;
 
 static PIN_COUNT: AtomicU32 = AtomicU32::new(0);
+/// 存活贴图句柄表（遮罩启动时对其压序）
+static PIN_REGISTRY: Mutex<Vec<isize>> = Mutex::new(Vec::new());
 static mut PIN_SEQ: u32 = 0;
 
 /// 单张贴图状态（UI 线程访问）
@@ -123,12 +126,8 @@ pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::cor
         }
 
         PIN_COUNT.fetch_add(1, Ordering::Relaxed);
-        let _ = SetLayeredWindowAttributes(
-            hwnd,
-            COLORREF(0),
-            255,
-            windows::Win32::UI::WindowsAndMessaging::LAYERED_WINDOW_ATTRIBUTES_FLAGS(0x0000_0002),
-        ); // LWA_ALPHA
+        // 登记存活贴图，供遮罩启动时压序
+        PIN_REGISTRY.lock().unwrap_or_else(|p| p.into_inner()).push(hwnd.0 as isize);
         let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
             hwnd,
             windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST,
@@ -142,6 +141,26 @@ pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::cor
 /// 当前存活贴图数
 pub fn count() -> u32 {
     PIN_COUNT.load(Ordering::Relaxed)
+}
+
+/// 将所有贴图窗口排到 `above` 句柄之后（即其下方）
+pub fn send_all_below(above: HWND) {
+    let reg = PIN_REGISTRY.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    for h in reg {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                windows::Win32::Foundation::HWND(h as *mut _),
+                above,
+                0,
+                0,
+                0,
+                0,
+                windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(
+                    0x0001 | 0x0002 | 0x0010, // NOSIZE | NOMOVE | NOACTIVATE
+                ),
+            );
+        }
+    }
 }
 
 fn state_from(hwnd: HWND) -> *mut PinState {
@@ -281,11 +300,28 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     let ctrl = wparam.0 & (0x0008 << 16) != 0; // MK_CONTROL
                     let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
                     if ctrl {
-                        // 透明度
+                        // 透明度：首次调整时动态启用 layered
+                        let ex = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+                            hwnd,
+                            windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-20),
+                        );
+                        if ex & 0x0008_0000 == 0 {
+                            windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
+                                hwnd,
+                                windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-20),
+                                ex | 0x0008_0000,
+                            );
+                            SetLayeredWindowAttributes(
+                                hwnd,
+                                COLORREF(0),
+                                (*st).alpha,
+                                windows::Win32::UI::WindowsAndMessaging::LAYERED_WINDOW_ATTRIBUTES_FLAGS(0x0000_0002),
+                            );
+                        }
                         let step = if delta > 0 { 16 } else { -16 };
                         let new = ((*st).alpha as i32 + step).clamp(102, 255); // 40%~100%
                         (*st).alpha = new as u8;
-                        let _ = SetLayeredWindowAttributes(
+                        SetLayeredWindowAttributes(
                             hwnd,
                             COLORREF(0),
                             new as u8,
@@ -355,6 +391,8 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 }
                 PIN_COUNT.fetch_sub(1, Ordering::Relaxed);
+                let mut reg = PIN_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+                reg.retain(|&h| h != hwnd.0 as isize);
                 let _ = PostMessageW(crate::app::main_hwnd(), PIN_CLOSED, WPARAM(0), LPARAM(0));
                 LRESULT(0)
             }
