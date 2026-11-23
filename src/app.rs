@@ -31,6 +31,14 @@ pub const HOTKEY_ID_SNIP: u32 = 0xB001;
 pub const SELECTION_DONE: u32 = WM_APP_BASE + 3;
 /// 一张贴图窗口关闭
 pub const PIN_CLOSED: u32 = WM_APP_BASE + 4;
+/// 工具条动作分发（wparam = action id）
+pub const TOOLBAR_ACTION: u32 = WM_APP_BASE + 5;
+/// OCR 结果就绪（结果存于 OCR_PENDING）
+pub const OCR_RESULT: u32 = WM_APP_BASE + 6;
+
+/// OCR 后台任务结果中转（结果文本 / 错误信息）
+pub static OCR_PENDING: std::sync::Mutex<Option<std::result::Result<Vec<crate::ocr::OcrLine>, String>>> =
+    std::sync::Mutex::new(None);
 
 static MAIN_HWND: OnceLock<isize> = OnceLock::new();
 
@@ -103,7 +111,63 @@ pub extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
             LRESULT(0)
         },
-        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        _ => {
+            if msg == OCR_RESULT {
+                handle_ocr_result();
+                return LRESULT(0);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+    }
+}
+
+/// OCR 后台任务结果：全文写入剪贴板并弹窗展示（结果面板 UI 后续迭代）
+fn handle_ocr_result() {
+    let taken = OCR_PENDING.lock().unwrap_or_else(|p| p.into_inner()).take();
+    let Some(result) = taken else { return };
+    match result {
+        Ok(lines) => {
+            if lines.is_empty() {
+                unsafe {
+                    let text = windows::core::HSTRING::from(
+                        "未识别到文字。\n\n如需识别其他语言，请在 设置 → 时间和语言 → 语言 中安装对应语言包",
+                    );
+                    let title = windows::core::HSTRING::from("文字识别");
+                    let _ = windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                        main_hwnd(),
+                        windows::core::PCWSTR(text.as_ptr()),
+                        windows::core::PCWSTR(title.as_ptr()),
+                        windows::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION
+                            | windows::Win32::UI::WindowsAndMessaging::MB_TOPMOST,
+                    );
+                }
+                return;
+            }
+            let text = lines
+                .iter()
+                .map(|l| l.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let _ = crate::clipboard::copy_text(&text);
+            crate::logging::info("OCR 完成，全文已入剪贴板");
+            unsafe {
+                let show = format!(
+                    "识别到 {} 行文本（已复制全文到剪贴板）：\n\n{}",
+                    lines.len(),
+                    text
+                );
+                let text = windows::core::HSTRING::from(show);
+                let title = windows::core::HSTRING::from("文字识别");
+                let _ = windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                    main_hwnd(),
+                    windows::core::PCWSTR(text.as_ptr()),
+                    windows::core::PCWSTR(title.as_ptr()),
+                    windows::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION
+                        | windows::Win32::UI::WindowsAndMessaging::MB_TOPMOST,
+                );
+            }
+        }
+        Err(err) => crate::logging::error(&format!("OCR 失败: {err}")),
     }
 }
 

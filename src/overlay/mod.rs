@@ -7,6 +7,7 @@
 //! 「底图 blit → 选区内原图 blit → 边框/放大镜」，拖动零全屏光栅化。
 
 pub mod render;
+pub mod toolbar;
 
 use std::sync::Mutex;
 
@@ -58,6 +59,10 @@ struct OverlayState {
     /// 离屏合成缓冲（与屏幕同尺寸，消除多次 blit 的中间状态闪烁）
     paint_dc: HDC,
     paint_bmp: HBITMAP,
+    /// 选区已确认，等待工具条动作
+    pending: bool,
+    /// 工具条窗口
+    toolbar: HWND,
 }
 
 static mut STATE: Option<OverlayState> = None;
@@ -172,6 +177,8 @@ pub fn start() -> Result<(), windows::core::Error> {
             first_paint_done: false,
             paint_dc,
             paint_bmp,
+            pending: false,
+            toolbar: HWND::default(),
         });
     }
     Ok(())
@@ -200,6 +207,9 @@ fn finish(hwnd: HWND) {
     unsafe {
         let _ = ReleaseCapture();
         if let Some(st) = STATE.as_ref() {
+            if !st.toolbar.is_invalid() {
+                toolbar::destroy(st.toolbar);
+            }
             cleanup_gdi(st);
         }
         let _ = DestroyWindow(hwnd);
@@ -335,6 +345,127 @@ unsafe fn pat_rect(hdc: HDC, r: &Rect, brush: HBRUSH) {
     SelectObject(hdc, old);
 }
 
+/// 工具条动作：以当前选区执行 截图/贴图/OCR/二维码
+unsafe fn handle_toolbar_action(hwnd: HWND, action: u32) {
+    let Some(st) = STATE.as_ref() else { return };
+    if !st.pending {
+        return;
+    }
+    let Some(sel) = st.selection else { return };
+    let desktop = Rect {
+        x: sel.x + st.origin.0,
+        y: sel.y + st.origin.1,
+        width: sel.width,
+        height: sel.height,
+    };
+    match action {
+        toolbar::action::SNIP => {
+            match capture_region(desktop) {
+                Ok(frame) => {
+                    if let Err(err) = crate::clipboard::copy_frame(&frame) {
+                        crate::logging::error(&err);
+                    } else {
+                        crate::logging::info("已复制到剪贴板");
+                    }
+                }
+                Err(err) => crate::logging::error(&format!("截图失败: {err}")),
+            }
+            finish(hwnd);
+        }
+        toolbar::action::PIN => {
+            match capture_region(desktop) {
+                Ok(frame) => {
+                    if let Err(err) = crate::pin::create(frame, (desktop.x, desktop.y)) {
+                        crate::logging::error(&format!("贴图失败: {err}"));
+                    }
+                }
+                Err(err) => crate::logging::error(&format!("截图失败: {err}")),
+            }
+            finish(hwnd);
+        }
+        toolbar::action::OCR => {
+            match capture_region(desktop) {
+                Ok(frame) => {
+                    // 后台识别，10s 硬超时；完成后主窗口弹结果
+                    let main = crate::app::main_hwnd();
+                    let main_isize = main.0 as isize;
+                    std::thread::spawn(move || {
+                        let main = windows::Win32::Foundation::HWND(main_isize as *mut _);
+                        let result = crate::scheduler::with_timeout(
+                            move || crate::ocr::recognize(&frame),
+                            crate::scheduler::LONG_TASK_TIMEOUT,
+                        )
+                        .unwrap_or_else(|| Err("识别超时".into()));
+                        *crate::app::OCR_PENDING.lock().unwrap_or_else(|p| p.into_inner()) =
+                            Some(result);
+                        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                            main,
+                            crate::app::OCR_RESULT,
+                            WPARAM(0),
+                            LPARAM(0),
+                        );
+                    });
+                }
+                Err(err) => crate::logging::error(&format!("截图失败: {err}")),
+            }
+            finish(hwnd);
+        }
+        toolbar::action::QR => {
+            match capture_region(desktop) {
+                Ok(frame) => match crate::qrcode::decode(&frame) {
+                    Some(crate::qrcode::QrContent::Text(text)) => {
+                        let _ = crate::clipboard::copy_text(&text);
+                        crate::logging::info("二维码文本已入剪贴板");
+                        message_box(hwnd, &text, "二维码识别", false);
+                    }
+                    Some(crate::qrcode::QrContent::Jump(target)) => {
+                        let risk = crate::qrcode::is_high_risk(&target);
+                        let msg = if risk {
+                            format!("\u{26a0} 高危协议链接，请谨慎确认：\n\n{target}")
+                        } else {
+                            format!("是否打开以下链接？\n\n{target}")
+                        };
+                        let title = if risk { "二维码识别（存在风险）" } else { "二维码识别" };
+                        let choice = message_box(hwnd, &msg, title, true);
+                        if choice == IDYES {
+                            if let Err(err) = crate::qrcode::open_jump(&target) {
+                                crate::logging::error(&format!("跳转失败: {err}"));
+                            }
+                        }
+                    }
+                    None => {
+                        message_box(hwnd, "未在选区内发现二维码", "二维码识别", false);
+                    }
+                },
+                Err(err) => crate::logging::error(&format!("截图失败: {err}")),
+            }
+            finish(hwnd);
+        }
+        _ => {}
+    }
+}
+
+const IDYES: i32 = 6;
+
+/// 简易结果浮窗（MessageBox）；`confirm` 为 true 时带 是/否 按钮
+unsafe fn message_box(parent: HWND, text: &str, title: &str, confirm: bool) -> i32 {
+    let flags = windows::Win32::UI::WindowsAndMessaging::MB_TOPMOST
+        | if confirm {
+            windows::Win32::UI::WindowsAndMessaging::MB_YESNO
+        } else {
+            windows::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION
+        };
+    let text = windows::core::HSTRING::from(text);
+    let title = windows::core::HSTRING::from(title);
+    windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+        parent,
+        windows::core::PCWSTR(text.as_ptr()),
+        windows::core::PCWSTR(title.as_ptr()),
+        flags,
+    )
+    .0
+}
+
 extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         match msg {
@@ -372,6 +503,14 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             WM_LBUTTONDOWN => {
                 let (x, y) = unpack_xy(lparam);
                 if let Some(st) = STATE.as_mut() {
+                    if st.pending {
+                        // 重新框选：收起工具条
+                        st.pending = false;
+                        toolbar::destroy(st.toolbar);
+                        st.toolbar = HWND::default();
+                        st.selection = None;
+                        st.prev_border = None;
+                    }
                     st.drag_start = Some((x, y));
                     st.cursor = (x, y);
                     let _ = SetCapture(hwnd);
@@ -399,8 +538,13 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     .as_ref()
                     .is_some_and(|st| st.drag_start.is_some() && st.selection.is_some());
                 if confirmed {
-                    // 先把选区换算到桌面坐标并暂存，WM_DESTROY 清 STATE 不影响后续取用
-                    let pending = STATE.as_ref().map(|st| {
+                    // 选区确认：进入 pending 模式，弹出工具条等待动作选择
+                    let _ = ReleaseCapture();
+                    if let Some(st) = STATE.as_mut() {
+                        st.pending = true;
+                        st.prev_border = st.selection.map(border_rect);
+                    }
+                    let sel_desktop = STATE.as_ref().map(|st| {
                         let sel = st.selection.unwrap();
                         Rect {
                             x: sel.x + st.origin.0,
@@ -409,15 +553,18 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                             height: sel.height,
                         }
                     });
-                    *PENDING_SELECTION.lock().unwrap_or_else(|p| p.into_inner()) = pending;
-                    let main = crate::app::main_hwnd();
-                    finish(hwnd);
-                    let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                        main,
-                        SELECTION_DONE,
-                        WPARAM(0),
-                        LPARAM(0),
-                    );
+                    if let Some(sel_desktop) = sel_desktop {
+                        match toolbar::show(hwnd, sel_desktop) {
+                            Ok(tb) => {
+                                if let Some(st) = STATE.as_mut() {
+                                    st.toolbar = tb;
+                                }
+                            }
+                            Err(err) => crate::logging::error(&format!("工具条创建失败: {err}")),
+                        }
+                    }
+                    // 选区从拖拽态定格，刷新边框高亮
+                    let _ = InvalidateRect(hwnd, None, false);
                 }
                 LRESULT(0)
             }
@@ -466,6 +613,10 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let cursor = LoadCursorW(None, IDC_CROSS).unwrap_or_default();
                 SetCursor(cursor);
                 LRESULT(1)
+            }
+            crate::app::TOOLBAR_ACTION => {
+                handle_toolbar_action(hwnd, wparam.0 as u32);
+                LRESULT(0)
             }
             WM_DESTROY => {
                 if let Some(st) = STATE.as_ref() {
