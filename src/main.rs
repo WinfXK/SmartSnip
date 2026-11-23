@@ -5,9 +5,11 @@
 //! 创建时间: 2026年11月23日
 
 mod app;
+mod autostart;
 mod config;
 mod single_instance;
 mod timefmt;
+mod tray;
 
 fn main() {
     let _single = match single_instance::acquire() {

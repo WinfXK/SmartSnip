@@ -23,6 +23,8 @@ pub const MAIN_WINDOW_CLASS: &str = "SmartSnip_MainWindow";
 pub const WM_APP_BASE: u32 = 0x8000;
 /// 二次启动唤醒既有实例：触发一次截图
 pub const ACTIVATE_SNIP: u32 = WM_APP_BASE + 1;
+/// 托盘图标回调消息
+pub const TRAY_CALLBACK: u32 = WM_APP_BASE + 2;
 
 static MAIN_HWND: OnceLock<isize> = OnceLock::new();
 
@@ -38,6 +40,7 @@ const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: DPI_AWARENESS_CONTEXT =
 extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_DESTROY => {
+            crate::tray::shutdown();
             unsafe { windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0) };
             LRESULT(0)
         }
@@ -46,7 +49,17 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             eprintln!("[{}] 唤醒既有实例：触发截图", crate::timefmt::now_cn_string());
             LRESULT(0)
         }
-        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        WM_CLOSE => unsafe {
+            // 主窗口不可见，托盘「退出」即销毁；后续可见设置窗口单独处理
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+            LRESULT(0)
+        },
+        _ => {
+            if let Some(handled) = crate::tray::handle_message(hwnd, msg, wparam, lparam) {
+                return handled;
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
     }
 }
 
@@ -84,6 +97,9 @@ pub fn run() -> Result<()> {
             None,
         )?;
         let _ = MAIN_HWND.set(hwnd.0 as isize);
+        if let Err(err) = crate::tray::init(hwnd) {
+            eprintln!("托盘初始化失败: {err}");
+        }
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
