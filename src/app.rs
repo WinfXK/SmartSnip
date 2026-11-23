@@ -54,8 +54,9 @@ fn register_startup_hotkey(hwnd: HWND) {
     match crate::hotkey::RegisteredHotKey::register(hwnd, &combo) {
         Ok(hk) => {
             let _ = HOTKEY_HANDLE.set(hk);
+            crate::logging::info("热键注册成功");
         }
-        Err(err) => eprintln!("热键注册失败({err})，请在设置中更换快捷键"),
+        Err(err) => crate::logging::error(&format!("热键注册失败({err})，请在设置中更换快捷键")),
     }
 }
 
@@ -69,12 +70,17 @@ pub extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
             LRESULT(0)
         }
         ACTIVATE_SNIP => {
-            eprintln!("[{}] 唤醒既有实例：触发截图", crate::timefmt::now_cn_string());
+            // 托盘单击 / 二次启动唤醒：触发一次截图
+            if let Err(err) = crate::overlay::start() {
+                crate::logging::error(&format!("覆盖层启动失败: {err}"));
+            }
             LRESULT(0)
         }
         WM_HOTKEY => {
             if crate::hotkey::handle_wm_hotkey(wparam, lparam).is_some() {
-                let _ = crate::overlay::start();
+                if let Err(err) = crate::overlay::start() {
+                    crate::logging::error(&format!("覆盖层启动失败: {err}"));
+                }
             }
             LRESULT(0)
         }

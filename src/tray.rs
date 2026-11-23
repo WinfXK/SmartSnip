@@ -98,7 +98,8 @@ pub fn show_context_menu(hwnd: HWND) {
 pub fn handle_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
     if msg == TRAY_CALLBACK {
         unsafe {
-            match lparam.0 as u32 {
+            // NOTIFY_ICON_VERSION(4)：事件在 lParam 低 16 位
+            match (lparam.0 & 0xFFFF) as u32 {
                 x if x == WM_LBUTTONUP => {
                     let _ = PostMessageW(hwnd, ACTIVATE_SNIP, WPARAM(0), LPARAM(0));
                 }

@@ -4,6 +4,9 @@
 //! Email: admin@winfxk.cn  QQ: 2508543202
 //! 创建时间: 2026年11月23日
 
+// release 版为窗口子系统：无控制台黑框；debug 保留控制台便于定位
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod annotate;
 mod autostart;
