@@ -134,6 +134,7 @@ pub fn start() -> Result<(), windows::core::Error> {
             SET_WINDOW_POS_FLAGS(0x0040), // SWP_SHOWWINDOW
         );
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        crate::logging::info("遮罩: 窗口已显示");
 
         let screen_dc = CreateDCW(windows::core::w!("DISPLAY"), None, None, None);
         let (src_dc, src_bmp) = frame_to_dc(&source, screen_dc);
@@ -158,6 +159,7 @@ pub fn start() -> Result<(), windows::core::Error> {
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
 
+        crate::logging::info("遮罩: 就绪");
         STATE = Some(OverlayState {
             hwnd,
             origin: (
@@ -349,7 +351,10 @@ unsafe fn pat_rect(hdc: HDC, r: &Rect, brush: HBRUSH) {
 
 /// 工具条动作：以当前选区执行 截图/贴图/OCR/二维码
 unsafe fn handle_toolbar_action(hwnd: HWND, action: u32) {
-    let Some(st) = STATE.as_ref() else { return };
+    let Some(st) = STATE.as_ref() else {
+        crate::logging::error("遮罩: 动作处理时状态已丢失");
+        return;
+    };
     if !st.pending {
         return;
     }
@@ -505,6 +510,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             }
             WM_LBUTTONDOWN => {
                 let (x, y) = unpack_xy(lparam);
+                crate::logging::info(&format!("遮罩: 按下 ({x},{y}) pending={}", STATE.as_ref().map(|s| s.pending).unwrap_or(false)));
                 if let Some(st) = STATE.as_mut() {
                     if st.pending {
                         // 重新框选：收起工具条
@@ -547,6 +553,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 if let Some(st) = STATE.as_mut() {
                     st.drag_start = None;
                 }
+                crate::logging::info(&format!("遮罩: 松开 confirmed={confirmed}"));
                 if confirmed {
                     // 选区确认：进入 pending 模式，弹出工具条等待动作选择
                     let _ = ReleaseCapture();
@@ -566,6 +573,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     if let Some(sel_desktop) = sel_desktop {
                         match toolbar::show(hwnd, sel_desktop) {
                             Ok(tb) => {
+                                crate::logging::info("遮罩: 工具条已弹出");
                                 if let Some(st) = STATE.as_mut() {
                                     st.toolbar = tb;
                                 }
@@ -625,6 +633,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 LRESULT(1)
             }
             crate::app::TOOLBAR_ACTION => {
+                crate::logging::info(&format!("遮罩: 收到工具条动作 {action}", action = wparam.0));
                 handle_toolbar_action(hwnd, wparam.0 as u32);
                 LRESULT(0)
             }

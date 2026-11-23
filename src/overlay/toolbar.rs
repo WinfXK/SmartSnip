@@ -241,6 +241,14 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 }
                 LRESULT(0)
             }
+            windows::Win32::UI::WindowsAndMessaging::WM_NCCALCSIZE => {
+                // 非 POPUP 形态会被系统附加 WS_CAPTION（白条）：客户区=全窗口
+                if wparam.0 != 0 {
+                    LRESULT(0)
+                } else {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+            }
             WM_ERASEBKGND => LRESULT(1),
             WM_SETCURSOR => {
                 let cursor = LoadCursorW(None, IDC_HAND).unwrap_or_default();

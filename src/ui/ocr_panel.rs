@@ -233,6 +233,13 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 }
                 LRESULT(0)
             }
+            windows::Win32::UI::WindowsAndMessaging::WM_NCCALCSIZE => {
+                if wparam.0 != 0 {
+                    LRESULT(0)
+                } else {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+            }
             WM_ERASEBKGND => LRESULT(1),
             WM_SETCURSOR => {
                 let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();

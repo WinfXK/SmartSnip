@@ -227,6 +227,15 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 // 整窗视为标题栏：拖动由系统原生处理，不依赖自家消息
                 return LRESULT(2); // HTCAPTION
             }
+            windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {
+                let r = DefWindowProcW(hwnd, msg, wparam, lparam);
+                crate::logging::info(&format!("贴图: nchittest={:#X}", r.0));
+                // 命中客户区时按标题栏处理，交给系统原生拖动
+                if r.0 as u32 == 1 {
+                    return LRESULT(2);
+                }
+                r
+            }
             windows::Win32::UI::WindowsAndMessaging::WM_NCCALCSIZE => {
                 // [实验A] 暂时走默认路径
                 if std::env::var("PIN_KEEP_BORDER").is_ok() {
