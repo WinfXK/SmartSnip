@@ -55,6 +55,9 @@ struct OverlayState {
     prev_border: Option<Rect>,
     /// 首帧已全屏绘制
     first_paint_done: bool,
+    /// 离屏合成缓冲（与屏幕同尺寸，消除多次 blit 的中间状态闪烁）
+    paint_dc: HDC,
+    paint_bmp: HBITMAP,
 }
 
 static mut STATE: Option<OverlayState> = None;
@@ -128,6 +131,21 @@ pub fn start() -> Result<(), windows::core::Error> {
         let screen_dc = CreateDCW(windows::core::w!("DISPLAY"), None, None, None);
         let (src_dc, src_bmp) = frame_to_dc(&source, screen_dc);
         let (dim_dc, dim_bmp) = frame_to_dc(&dimmed, screen_dc);
+        // 离屏合成缓冲
+        let mut bi = BITMAPINFO::default();
+        bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bi.bmiHeader.biWidth = bounds.width;
+        bi.bmiHeader.biHeight = -bounds.height;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = DIB_RGB_COLORS.0;
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let paint_bmp = windows::Win32::Graphics::Gdi::CreateDIBSection(
+            screen_dc, &bi, DIB_RGB_COLORS, &mut bits, None, 0,
+        )
+        .unwrap_or_default();
+        let paint_dc = CreateCompatibleDC(screen_dc);
+        SelectObject(paint_dc, windows::Win32::Graphics::Gdi::HGDIOBJ(paint_bmp.0));
         let _ = DeleteDC(screen_dc);
 
         let mut pt = POINT::default();
@@ -152,6 +170,8 @@ pub fn start() -> Result<(), windows::core::Error> {
             selection: None,
             prev_border: None,
             first_paint_done: false,
+            paint_dc,
+            paint_bmp,
         });
     }
     Ok(())
@@ -171,6 +191,8 @@ fn cleanup_gdi(st: &OverlayState) {
         let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(st.dim_bmp.0));
         let _ = DeleteDC(st.src_dc);
         let _ = DeleteDC(st.dim_dc);
+        let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(st.paint_bmp.0));
+        let _ = DeleteDC(st.paint_dc);
     }
 }
 
@@ -320,24 +342,32 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let mut ps = PAINTSTRUCT::default();
                 let hdc = BeginPaint(hwnd, &mut ps);
                 if let Some(st) = STATE.as_ref() {
-                    if !st.first_paint_done {
-                        // 首帧全屏压暗
-                        let full = RECT {
-                            left: 0,
-                            top: 0,
-                            right: st.screen.0,
-                            bottom: st.screen.1,
-                        };
-                        paint(hdc, &full);
+                    let full = !st.first_paint_done;
+                    let rc = if full {
+                        RECT { left: 0, top: 0, right: st.screen.0, bottom: st.screen.1 }
+                    } else {
+                        ps.rcPaint
+                    };
+                    // 合成到离屏缓冲，再一次性上屏（消除中间状态闪烁）
+                    paint(st.paint_dc, &rc);
+                    let _ = BitBlt(
+                        hdc,
+                        rc.left, rc.top,
+                        rc.right - rc.left, rc.bottom - rc.top,
+                        st.paint_dc, rc.left, rc.top, SRCCOPY,
+                    );
+                    if full {
                         if let Some(st_mut) = STATE.as_mut() {
                             st_mut.first_paint_done = true;
                         }
-                    } else {
-                        paint(hdc, &ps.rcPaint);
                     }
                 }
                 let _ = EndPaint(hwnd, &ps);
                 LRESULT(0)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_ERASEBKGND => {
+                // 背景擦除交给离屏合成，避免闪烁
+                LRESULT(1)
             }
             WM_LBUTTONDOWN => {
                 let (x, y) = unpack_xy(lparam);
