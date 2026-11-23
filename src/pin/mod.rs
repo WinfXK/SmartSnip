@@ -84,7 +84,7 @@ pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::cor
         }));
 
         let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0x0000_0020 | 0x0000_0080 | 0x0008_0000), // TOPMOST | TOOLWINDOW | LAYERED
+            WINDOW_EX_STYLE(0x0000_0008 | 0x0000_0080 | 0x0008_0000), // WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::w!("SmartSnip Pin"),
             WINDOW_STYLE(0x8000_0000), // WS_POPUP（无边框，无白色描边）

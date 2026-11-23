@@ -73,7 +73,7 @@ pub fn show(lines: Vec<String>, near: (i32, i32)) -> Result<HWND, windows::core:
             y = sh - h - 20;
         }
         let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0x0000_0020 | 0x0000_0080),
+            WINDOW_EX_STYLE(0x0000_0008 | 0x0000_0080), // WS_EX_TOPMOST | WS_EX_TOOLWINDOW
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::w!(""),
             WINDOW_STYLE(0x8000_0000),
