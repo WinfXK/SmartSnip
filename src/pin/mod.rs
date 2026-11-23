@@ -1,0 +1,299 @@
+//! Copyright (c) 2026 Winfxk (冰月)
+//! Email: admin@winfxk.cn  QQ: 2508543202
+//! 创建时间: 2026年11月23日
+//!
+//! 贴图便签窗口：无边框置顶、1:1 物理像素、拖动移动、
+//! 滚轮缩放（0.2x~5x）、Ctrl+滚轮透明度（40%~100%）、多实例、即用即毁。
+
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, EndPaint, InvalidateRect, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER,
+    DIB_RGB_COLORS, PAINTSTRUCT, SRCCOPY,
+};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GetCursorPos,
+    GetSystemMetrics, LoadCursorW, PostMessageW, RegisterClassW, SetCursor, SetLayeredWindowAttributes, AppendMenuW,
+    TrackPopupMenu, SM_CXSCREEN, SM_CYSCREEN, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
+    WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEWHEEL, WM_PAINT,
+    WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW,
+};
+
+use crate::capture::Frame;
+use crate::app::{PIN_CLOSED};
+
+const CLASS_NAME: &str = "SmartSnip_PinWindow";
+/// 贴图数量上限（防失控）
+pub const MAX_PINS: u32 = 20;
+/// 缩放范围
+const MIN_SCALE_X100: i32 = 20;
+const MAX_SCALE_X100: i32 = 500;
+
+static PIN_COUNT: AtomicU32 = AtomicU32::new(0);
+static mut PIN_SEQ: u32 = 0;
+
+/// 单张贴图状态（UI 线程访问）
+struct PinState {
+    frame: Frame,
+    /// 缩放百分比
+    scale_x100: i32,
+    /// 不透明度 0~255
+    alpha: u8,
+}
+
+/// 每个窗口对应一份状态，通过 GWLP_USERDATA 关联
+const GWLP_USERDATA: windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX =
+    windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-21);
+
+fn can_create() -> bool {
+    PIN_COUNT.load(Ordering::Relaxed) < MAX_PINS
+}
+
+/// 创建贴图窗口；`screen_pos` 为桌面物理坐标
+pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::core::Error> {
+    if !can_create() {
+        eprintln!("贴图数量已达上限（{MAX_PINS}）");
+        return Err(windows::core::Error::from_win32());
+    }
+    unsafe {
+        let hinstance = GetModuleHandleW(None)?;
+        let class_name = windows::core::HSTRING::from(CLASS_NAME);
+        static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if REGISTERED.get().is_none() {
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(wnd_proc),
+                hInstance: hinstance.into(),
+                hCursor: LoadCursorW(None, windows::Win32::UI::WindowsAndMessaging::IDC_HAND).unwrap_or_default(),
+                lpszClassName: windows::core::PCWSTR(class_name.as_ptr()),
+                ..Default::default()
+            };
+            RegisterClassW(&wc);
+            REGISTERED.set(()).ok();
+        }
+
+        PIN_SEQ += 1;
+        let state = Box::into_raw(Box::new(PinState {
+            frame,
+            scale_x100: 100,
+            alpha: 255,
+        }));
+
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE(0x0000_0020 | 0x0000_0080 | 0x0008_0000), // TOPMOST | TOOLWINDOW | LAYERED
+            windows::core::PCWSTR(class_name.as_ptr()),
+            windows::core::w!("SmartSnip Pin"),
+            WINDOW_STYLE(0x8000_0000 | 0x0040_0000), // WS_POPUP | WS_SYSMENU(供 Alt+F4)
+            screen_pos.0,
+            screen_pos.1,
+            (*state).frame.width as i32,
+            (*state).frame.height as i32,
+            None,
+            None,
+            windows::Win32::Foundation::HINSTANCE(hinstance.0),
+            Some(state.cast()),
+        )?;
+        PIN_COUNT.fetch_add(1, Ordering::Relaxed);
+        let _ = SetLayeredWindowAttributes(
+            hwnd,
+            COLORREF(0),
+            255,
+            windows::Win32::UI::WindowsAndMessaging::LAYERED_WINDOW_ATTRIBUTES_FLAGS(0x0000_0002),
+        ); // LWA_ALPHA
+        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST,
+            0, 0, 0, 0,
+            windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(0x0001 | 0x0002 | 0x0040), // NOSIZE | NOMOVE | SHOWWINDOW
+        );
+        Ok(hwnd)
+    }
+}
+
+/// 当前存活贴图数
+pub fn count() -> u32 {
+    PIN_COUNT.load(Ordering::Relaxed)
+}
+
+fn state_from(hwnd: HWND) -> *mut PinState {
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PinState
+    }
+}
+
+fn close(hwnd: HWND) {
+    unsafe {
+        let _ = DestroyWindow(hwnd);
+    }
+}
+
+extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    unsafe {
+        match msg {
+            windows::Win32::UI::WindowsAndMessaging::WM_NCCREATE => {
+                let create = lparam.0 as *mut windows::Win32::UI::WindowsAndMessaging::CREATESTRUCTW;
+                let state = (*create).lpCreateParams as *mut PinState;
+                windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize);
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_PAINT => {
+                let st = state_from(hwnd);
+                if !st.is_null() {
+                    let mut ps = PAINTSTRUCT::default();
+                    let hdc = BeginPaint(hwnd, &mut ps);
+                    let disp_w = ((*st).frame.width as i32 * (*st).scale_x100 / 100).max(1);
+                    let disp_h = ((*st).frame.height as i32 * (*st).scale_x100 / 100).max(1);
+                    let mut bi = BITMAPINFO::default();
+                    bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+                    bi.bmiHeader.biWidth = (*st).frame.width as i32;
+                    bi.bmiHeader.biHeight = -((*st).frame.height as i32);
+                    bi.bmiHeader.biPlanes = 1;
+                    bi.bmiHeader.biBitCount = 32;
+                    bi.bmiHeader.biCompression = DIB_RGB_COLORS.0;
+                    let _ = StretchDIBits(
+                        hdc, 0, 0, disp_w, disp_h, 0, 0,
+                        (*st).frame.width as i32, (*st).frame.height as i32,
+                        Some((*st).frame.data.as_ptr().cast()), &bi, DIB_RGB_COLORS, SRCCOPY,
+                    );
+                    let _ = EndPaint(hwnd, &ps);
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN => {
+                // 任意位置拖动移动窗口
+                let _ = ReleaseCapture2(hwnd);
+                let _ = windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                    hwnd,
+                    windows::Win32::UI::WindowsAndMessaging::WM_NCLBUTTONDOWN,
+                    WPARAM(2), // HTCAPTION
+                    lparam,
+                );
+                LRESULT(0)
+            }
+            WM_MOUSEWHEEL => {
+                let st = state_from(hwnd);
+                if !st.is_null() {
+                    let ctrl = wparam.0 & (0x0008 << 16) != 0; // MK_CONTROL
+                    let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+                    if ctrl {
+                        // 透明度
+                        let step = if delta > 0 { 16 } else { -16 };
+                        let new = ((*st).alpha as i32 + step).clamp(102, 255); // 40%~100%
+                        (*st).alpha = new as u8;
+                        let _ = SetLayeredWindowAttributes(
+                            hwnd,
+                            COLORREF(0),
+                            new as u8,
+                            windows::Win32::UI::WindowsAndMessaging::LAYERED_WINDOW_ATTRIBUTES_FLAGS(0x0000_0002),
+                        );
+                    } else {
+                        // 缩放
+                        let step = if delta > 0 { 10 } else { -10 };
+                        (*st).scale_x100 =
+                            ((*st).scale_x100 + step).clamp(MIN_SCALE_X100, MAX_SCALE_X100);
+                        let disp_w = ((*st).frame.width as i32 * (*st).scale_x100 / 100).max(1);
+                        let disp_h = ((*st).frame.height as i32 * (*st).scale_x100 / 100).max(1);
+                        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                            hwnd, None, 0, 0, disp_w, disp_h,
+                            windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(0x0002 | 0x0004), // NOMOVE | NOZORDER
+                        );
+                        let _ = InvalidateRect(hwnd, None, false);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_RBUTTONUP => {
+                show_pin_menu(hwnd);
+                LRESULT(0)
+            }
+            WM_KEYDOWN => {
+                if wparam.0 as u32 == 0x1B {
+                    close(hwnd);
+                }
+                LRESULT(0)
+            }
+            WM_COMMAND => {
+                match (wparam.0 & 0xFFFF) as u16 {
+                    menu::CLOSE => close(hwnd),
+                    menu::COPY => {
+                        let st = state_from(hwnd);
+                        if !st.is_null() {
+                            if let Err(err) = crate::clipboard::copy_frame(&(*st).frame) {
+                                eprintln!("{err}");
+                            }
+                        }
+                    }
+                    menu::SAVE => {
+                        let st = state_from(hwnd);
+                        if !st.is_null() {
+                            let path = crate::clipboard::default_save_path();
+                            if let Err(err) = crate::clipboard::save_frame_png(&(*st).frame, &path) {
+                                eprintln!("{err}");
+                            } else {
+                                eprintln!("已保存: {}", path.display());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                let st = state_from(hwnd);
+                if !st.is_null() {
+                    drop(Box::from_raw(st));
+                    windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                }
+                PIN_COUNT.fetch_sub(1, Ordering::Relaxed);
+                let _ = PostMessageW(crate::app::main_hwnd(), PIN_CLOSED, WPARAM(0), LPARAM(0));
+                LRESULT(0)
+            }
+            WM_SETCURSOR => {
+                let cursor = LoadCursorW(None, windows::Win32::UI::WindowsAndMessaging::IDC_HAND).unwrap_or_default();
+                SetCursor(cursor);
+                LRESULT(1)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+mod menu {
+    pub const CLOSE: u16 = 1;
+    pub const COPY: u16 = 2;
+    pub const SAVE: u16 = 3;
+}
+
+fn show_pin_menu(hwnd: HWND) {
+    unsafe {
+        let menu: windows::Win32::UI::WindowsAndMessaging::HMENU =
+            CreatePopupMenu().unwrap_or_default();
+        if menu.is_invalid() {
+            return;
+        }
+        let _ = AppendMenuW(menu, windows::Win32::UI::WindowsAndMessaging::MENU_ITEM_FLAGS(0), menu::COPY as usize, windows::core::w!("复制到剪贴板"));
+        let _ = AppendMenuW(menu, windows::Win32::UI::WindowsAndMessaging::MENU_ITEM_FLAGS(0), menu::SAVE as usize, windows::core::w!("另存为 PNG"));
+        let _ = AppendMenuW(menu, windows::Win32::UI::WindowsAndMessaging::MENU_ITEM_FLAGS(0), menu::CLOSE as usize, windows::core::w!("关闭贴图"));
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let _ = TrackPopupMenu(menu, windows::Win32::UI::WindowsAndMessaging::TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, None);
+        let _ = PostMessageW(hwnd, windows::Win32::UI::WindowsAndMessaging::WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(menu);
+    }
+}
+
+/// SetCapture/ReleaseCapture 别名收口
+#[allow(non_snake_case)]
+fn ReleaseCapture2(_: HWND) -> windows::core::Result<()> {
+    unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() }
+}
+
+// 屏幕尺寸保留用于默认落位越界修正（M4 打磨）
+const _: windows::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX = SM_CXSCREEN;
+const _: windows::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX = SM_CYSCREEN;
+
+#[allow(unused)]
+fn _unused_rect(r: RECT) -> RECT {
+    r
+}

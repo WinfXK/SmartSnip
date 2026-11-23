@@ -12,6 +12,7 @@ mod clipboard;
 mod config;
 mod hotkey;
 mod overlay;
+mod pin;
 mod single_instance;
 mod timefmt;
 mod tray;

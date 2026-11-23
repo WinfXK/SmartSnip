@@ -29,6 +29,8 @@ pub const TRAY_CALLBACK: u32 = WM_APP_BASE + 2;
 pub const HOTKEY_ID_SNIP: u32 = 0xB001;
 /// 覆盖层选区确认完成
 pub const SELECTION_DONE: u32 = WM_APP_BASE + 3;
+/// 一张贴图窗口关闭
+pub const PIN_CLOSED: u32 = WM_APP_BASE + 4;
 
 static MAIN_HWND: OnceLock<isize> = OnceLock::new();
 
