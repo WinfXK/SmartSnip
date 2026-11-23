@@ -5,6 +5,7 @@
 //! 创建时间: 2026年11月23日
 
 mod app;
+mod config;
 mod timefmt;
 
 fn main() {
