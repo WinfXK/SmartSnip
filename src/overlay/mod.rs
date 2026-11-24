@@ -134,7 +134,12 @@ pub fn start() -> Result<(), windows::core::Error> {
             SET_WINDOW_POS_FLAGS(0x0040), // SWP_SHOWWINDOW
         );
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        crate::logging::info("遮罩: 窗口已显示");
+        // 将所有贴图压到遮罩之下，保证框选鼠标事件不被贴图截走
+        crate::pin::send_all_below(hwnd);
+        crate::logging::info(&format!(
+            "遮罩: 窗口已显示，贴图压序完成（{} 张）",
+            crate::pin::count()
+        ));
 
         let screen_dc = CreateDCW(windows::core::w!("DISPLAY"), None, None, None);
         let (src_dc, src_bmp) = frame_to_dc(&source, screen_dc);
