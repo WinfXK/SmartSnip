@@ -31,12 +31,13 @@ pub mod action {
     pub const OCR: u32 = 3;
     pub const QR: u32 = 4;
     pub const ANNOTATE: u32 = 5;
-    /// 标注模式：画笔 / 矩形 / 换色 / 撤销 / 完成
+    /// 标注模式：画笔 / 矩形 / 文字 / 换色 / 撤销 / 完成
     pub const PEN: u32 = 10;
     pub const RECT: u32 = 11;
-    pub const COLOR: u32 = 12;
-    pub const UNDO: u32 = 13;
-    pub const DONE: u32 = 14;
+    pub const TEXT: u32 = 12;
+    pub const COLOR: u32 = 13;
+    pub const UNDO: u32 = 14;
+    pub const DONE: u32 = 15;
 }
 
 /// 工具条形态
@@ -47,7 +48,7 @@ pub enum Kind {
 }
 
 const MAIN_LABELS: [&str; 5] = ["截图", "贴图", "识文", "二维码", "标注"];
-const ANNOT_LABELS: [&str; 5] = ["画笔", "矩形", "颜色", "撤销", "完成"];
+const ANNOT_LABELS: [&str; 6] = ["画笔", "矩形", "文字", "颜色", "撤销", "完成"];
 
 static mut KIND: Kind = Kind::Main;
 
@@ -185,8 +186,9 @@ fn action_for(i: i32) -> u32 {
             Kind::Annotate => match i {
                 0 => action::PEN,
                 1 => action::RECT,
-                2 => action::COLOR,
-                3 => action::UNDO,
+                2 => action::TEXT,
+                3 => action::COLOR,
+                4 => action::UNDO,
                 _ => action::DONE,
             },
         }

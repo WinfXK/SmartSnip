@@ -7,17 +7,20 @@
 //! 「底图 blit → 选区内原图 blit → 边框/放大镜」，拖动零全屏光栅化。
 
 pub mod render;
+pub mod text_input;
 pub mod toolbar;
 
 use std::sync::Mutex;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    AlphaBlend, BeginPaint, BitBlt, CreateCompatibleDC, CreateDCW, CreateDIBSection, CreatePen,
-    CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, GetPixel, GetStockObject, InvalidateRect,
-    PatBlt, Polyline, Rectangle, SelectObject, StretchBlt, AC_SRC_OVER, BITMAPINFO,
-    BITMAPINFOHEADER, BLENDFUNCTION, DIB_RGB_COLORS, HBRUSH, HBITMAP, HDC, HOLLOW_BRUSH,
-    PAINTSTRUCT, PS_SOLID, SRCCOPY,
+    AlphaBlend, BeginPaint, BitBlt, CreateCompatibleDC, CreateDCW, CreateDIBSection, CreateFontW,
+    CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, GetPixel, GetStockObject,
+    InvalidateRect, PatBlt, Polyline, Rectangle, SelectObject, SetBkMode, SetTextColor,
+    StretchBlt, TextOutW, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DIB_RGB_COLORS, FF_DONTCARE,
+    FW_NORMAL, HBRUSH, HBITMAP, HDC, HOLLOW_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID,
+    SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus};
@@ -84,6 +87,7 @@ struct OverlayState {
 enum AnnotTool {
     Pen,
     Rect,
+    Text,
 }
 
 static mut STATE: Option<OverlayState> = None;
@@ -459,7 +463,35 @@ unsafe fn draw_annotation(hdc: HDC, a: &crate::annotate::Annotation, ox: i32, oy
             SelectObject(hdc, old_pen);
             let _ = DeleteObject(HGDIOBJ(pen.0));
         }
-        Annotation::Text { .. } => {}
+        Annotation::Text { x, y, content, color } => {
+            if content.is_empty() {
+                return;
+            }
+            let face = windows::core::HSTRING::from("Microsoft YaHei UI");
+            let font = CreateFontW(
+                16,
+                0,
+                0,
+                0,
+                FW_NORMAL.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET.0 as u32,
+                OUT_DEFAULT_PRECIS.0 as u32,
+                CLIP_DEFAULT_PRECIS.0 as u32,
+                CLEARTYPE_QUALITY.0 as u32,
+                FF_DONTCARE.0 as u32,
+                windows::core::PCWSTR(face.as_ptr()),
+            );
+            let old = SelectObject(hdc, HGDIOBJ(font.0));
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            let _ = SetTextColor(hdc, colorref(*color));
+            let wide: Vec<u16> = content.encode_utf16().collect();
+            let _ = TextOutW(hdc, x + ox, y + oy, &wide);
+            SelectObject(hdc, old);
+            let _ = DeleteObject(HGDIOBJ(font.0));
+        }
     }
 }
 
@@ -604,6 +636,7 @@ unsafe fn handle_annotate_action(hwnd: HWND, action: u32) -> bool {
     match action {
         toolbar::action::PEN => st.annot_tool = AnnotTool::Pen,
         toolbar::action::RECT => st.annot_tool = AnnotTool::Rect,
+        toolbar::action::TEXT => st.annot_tool = AnnotTool::Text,
         toolbar::action::COLOR => st.annot_color = st.annot_color.next(),
         toolbar::action::UNDO => {
             st.annotations.undo();
@@ -624,6 +657,10 @@ unsafe fn capture_annotated(
 ) -> windows::core::Result<crate::capture::Frame> {
     let mut frame = capture_region(desktop)?;
     st.annotations.render(&mut frame);
+    // 截图输出恒为不透明，修正 GDI 文本绘制可能留下的 alpha=0
+    for px in frame.data.chunks_exact_mut(4) {
+        px[3] = 255;
+    }
     Ok(frame)
 }
 
@@ -791,6 +828,11 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 if let Some(st) = STATE.as_mut() {
                     if st.annotating {
                         if let Some((lx, ly)) = local_point(st, x, y) {
+                            if st.annot_tool == AnnotTool::Text {
+                                let screen = (x + st.origin.0, y + st.origin.1);
+                                text_input::show(hwnd, screen, (lx, ly));
+                                return LRESULT(0);
+                            }
                             use crate::annotate::Annotation;
                             let color = st.annot_color;
                             st.annot_preview = Some(match st.annot_tool {
@@ -807,6 +849,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                                     color,
                                     width: 2,
                                 },
+                                AnnotTool::Text => return LRESULT(0),
                             });
                             st.annot_dirty = preview_bounds(st);
                             if let Some(d) = st.annot_dirty {
@@ -988,6 +1031,24 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let cursor = LoadCursorW(None, IDC_CROSS).unwrap_or_default();
                 SetCursor(cursor);
                 LRESULT(1)
+            }
+            crate::app::TEXT_COMMITTED => {
+                let taken = text_input::PENDING
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take();
+                if let (Some((content, tx, ty)), Some(st)) = (taken, STATE.as_mut()) {
+                    st.annotations.add(crate::annotate::Annotation::Text {
+                        x: tx,
+                        y: ty,
+                        content,
+                        color: st.annot_color,
+                    });
+                    if let Some(sel) = st.selection {
+                        let _ = InvalidateRect(hwnd, Some(&sel.to_win32()), false);
+                    }
+                }
+                LRESULT(0)
             }
             crate::app::TOOLBAR_ACTION => {
                 let action = wparam.0 as u32;

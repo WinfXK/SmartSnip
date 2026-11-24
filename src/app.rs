@@ -35,6 +35,8 @@ pub const PIN_CLOSED: u32 = WM_APP_BASE + 4;
 pub const TOOLBAR_ACTION: u32 = WM_APP_BASE + 5;
 /// OCR 结果就绪（结果存于 OCR_PENDING）
 pub const OCR_RESULT: u32 = WM_APP_BASE + 6;
+/// 文字标注输入完成（结果存于 overlay::text_input::PENDING）
+pub const TEXT_COMMITTED: u32 = WM_APP_BASE + 7;
 
 /// OCR 后台任务结果中转（结果文本 / 错误信息）
 pub static OCR_PENDING: std::sync::Mutex<Option<std::result::Result<Vec<crate::ocr::OcrLine>, String>>> =

@@ -125,7 +125,7 @@ impl AnnotationLayer {
                     }
                 }
                 Annotation::Text { x, y, content, color } => {
-                    draw_text_5x7(frame, *x, *y, content, color.rgb());
+                    render_text(frame, *x, *y, content, color.rgb());
                 }
             }
         }
@@ -180,43 +180,70 @@ fn draw_line_1px(frame: &mut Frame, a: (i32, i32), b: (i32, i32), rgb: [u8; 3]) 
     }
 }
 
-/// 5x7 点阵文字（ASCII 可打印区；非 ASCII 以占位块渲染）
-const FONT_5X7: &[[u8; 7]; 95] = &font_table();
+/// 用 GDI 将文字绘制到 BGRA 帧（支持中文，点阵占位方案已替换）
+pub(crate) fn render_text(frame: &mut Frame, x: i32, y: i32, text: &str, rgb: [u8; 3]) {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, CreateDCW, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
+        SelectObject, SetBkMode, SetTextColor, TextOutW, BITMAPINFO, BITMAPINFOHEADER,
+        CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DIB_RGB_COLORS, FF_DONTCARE,
+        FW_NORMAL, HGDIOBJ, OUT_DEFAULT_PRECIS, TRANSPARENT,
+    };
 
-const fn font_table() -> [[u8; 7]; 95] {
-    // 仅登记常用 ASCII（' '~'~'），未覆盖字符渲染为实心块
-    let mut t = [[0b11111; 7]; 95];
-    t[0] = [0, 0, 0, 0, 0, 0, 0]; // ' '
-    t[1] = [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0, 0b00100]; // '!'
-    t[33] = [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110]; // '8'
-    t[65] = [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001]; // 'A'
-    t[66] = [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110]; // 'B'
-    t[67] = [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110]; // 'C'
-    t[83] = [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110]; // 'S'
-    t
-}
-
-/// 5x7 点阵渲染；中文等宽字符按占位块处理（后续接入 GDI 文本绘制替换）
-fn draw_text_5x7(frame: &mut Frame, x: i32, y: i32, text: &str, rgb: [u8; 3]) {
-    let mut cx = x;
-    for ch in text.chars() {
-        let ascii = ch as u32;
-        let glyph: [u8; 7] = if (0x20..=0x7E).contains(&ascii) {
-            FONT_5X7[(ascii - 0x20) as usize]
-        } else {
-            [0b11111; 7]
-        };
-        for (row, bits) in glyph.iter().enumerate() {
-            for col in 0..5 {
-                if bits & (1 << (4 - col)) != 0 {
-                    let (px, py) = (cx + col, y + row as i32);
-                    if px >= 0 && py >= 0 {
-                        draw_line_1px(frame, (px, py), (px, py), rgb);
-                    }
-                }
-            }
+    if text.is_empty() {
+        return;
+    }
+    unsafe {
+        let screen = CreateDCW(windows::core::w!("DISPLAY"), None, None, None);
+        if screen.is_invalid() {
+            return;
         }
-        cx += 6;
+        let mut bi = BITMAPINFO::default();
+        bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bi.bmiHeader.biWidth = frame.width as i32;
+        bi.bmiHeader.biHeight = -(frame.height as i32);
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = DIB_RGB_COLORS.0;
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
+        if bits.is_null() {
+            let _ = DeleteDC(screen);
+            return;
+        }
+        std::ptr::copy_nonoverlapping(frame.data.as_ptr(), bits as *mut u8, frame.data.len());
+        let dc = CreateCompatibleDC(screen);
+        let old_bmp = SelectObject(dc, HGDIOBJ(bmp.0));
+        let face = HSTRING::from("Microsoft YaHei UI");
+        let font = CreateFontW(
+            16,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            FF_DONTCARE.0 as u32,
+            PCWSTR(face.as_ptr()),
+        );
+        let old_font = SelectObject(dc, HGDIOBJ(font.0));
+        let _ = SetBkMode(dc, TRANSPARENT);
+        let _ = SetTextColor(dc, COLORREF(rgb[0] as u32 | (rgb[1] as u32) << 8 | (rgb[2] as u32) << 16));
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        let _ = TextOutW(dc, x, y, &wide);
+        SelectObject(dc, old_font);
+        let _ = DeleteObject(HGDIOBJ(font.0));
+        SelectObject(dc, old_bmp);
+        std::ptr::copy_nonoverlapping(bits as *const u8, frame.data.as_mut_ptr(), frame.data.len());
+        let _ = DeleteObject(HGDIOBJ(bmp.0));
+        let _ = DeleteDC(dc);
+        let _ = DeleteDC(screen);
     }
 }
 
@@ -280,12 +307,13 @@ mod tests {
     }
 
     #[test]
-    fn text_renders_placeholder_for_cjk() {
+    fn text_renders_colored_pixels() {
         let mut layer = AnnotationLayer::default();
-        layer.add(Annotation::Text { x: 0, y: 0, content: "中".into(), color: AnnotateColor::Black });
-        let mut f = frame8();
+        layer.add(Annotation::Text { x: 2, y: 2, content: "Hi".into(), color: AnnotateColor::Red });
+        let mut f = Frame::new(120, 40);
         layer.render(&mut f);
-        assert_eq!(f.data[0], 0x21); // 黑色占位块
+        // 文字像素应写入非零 RGB
+        assert!(f.data.chunks_exact(4).any(|p| p[0] != 0 || p[1] != 0 || p[2] != 0));
     }
 
     #[test]
