@@ -516,7 +516,16 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             }
             WM_LBUTTONDOWN => {
                 let (x, y) = unpack_xy(lparam);
-                crate::logging::info(&format!("遮罩: 按下 ({x},{y}) pending={}", STATE.as_ref().map(|s| s.pending).unwrap_or(false)));
+                crate::logging::info(&format!(
+                    "遮罩: 按下 ({x},{y}) pending={} capture={}",
+                    STATE.as_ref().map(|s| s.pending).unwrap_or(false),
+                    {
+                        let mut ti = windows::Win32::UI::WindowsAndMessaging::GUITHREADINFO::default();
+                        ti.cbSize = std::mem::size_of::<windows::Win32::UI::WindowsAndMessaging::GUITHREADINFO>() as u32;
+                        let _ = windows::Win32::UI::WindowsAndMessaging::GetGUIThreadInfo(0, &mut ti);
+                        ti.hwndCapture.0 as usize != 0
+                    }
+                ));
                 if let Some(st) = STATE.as_mut() {
                     if st.pending {
                         // 重新框选：收起工具条
@@ -533,6 +542,9 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
+                if STATE.as_ref().map(|s| !s.first_paint_done).unwrap_or(true) {
+                    crate::logging::info("遮罩: [诊断] 收到移动(首帧前)");
+                }
                 let (x, y) = unpack_xy(lparam);
                 if let Some(st) = STATE.as_mut() {
                     st.cursor = (x, y);
