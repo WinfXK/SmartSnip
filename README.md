@@ -221,9 +221,11 @@ cargo clippy --all-targets  # 静态检查
 **配置改坏了怎么办？**
 直接删除或忽略即可，程序会备份为 `config.toml.bak` 并用默认值重建。
 
-## 版权
+## 许可证
 
-Copyright (c) 2026 Winfxk（冰月）。保留所有权利。
+本项目基于 [MIT License](LICENSE) 开源，可自由使用、修改、分发与商用，仅需保留版权声明与免责声明。
+
+Copyright (c) 2026 Winfxk（冰月）
 
 - Email: admin@winfxk.cn
 - QQ: 2508543202
