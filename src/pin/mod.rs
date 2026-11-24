@@ -205,7 +205,7 @@ pub fn set_all_enabled(enabled: bool) {
     let reg = PIN_REGISTRY.lock().unwrap_or_else(|p| p.into_inner()).clone();
     for h in reg {
         unsafe {
-            let _ = windows::Win32::UI::WindowsAndMessaging::EnableWindow(
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
                 windows::Win32::Foundation::HWND(h as *mut _),
                 enabled,
             );
