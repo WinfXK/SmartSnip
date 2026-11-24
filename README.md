@@ -4,7 +4,7 @@
 
 <h1 align="center">SmartSnip</h1>
 
-<p align="center">轻量级 Windows 常驻截图工具 · 单文件原生 exe · 零运行时依赖</p>
+<p align="center">轻量级 Windows 常驻截图工具 · 单文件原生 exe · 零运行时依赖 · v1.0.0</p>
 
 <p align="center">
   <a href="#特性">特性</a> ·
