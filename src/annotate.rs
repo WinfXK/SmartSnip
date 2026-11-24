@@ -24,6 +24,26 @@ impl AnnotateColor {
             Self::Black => [0x21, 0x21, 0x21],
         }
     }
+
+    /// 配置名 → 颜色（未知值回退红色）
+    pub fn from_name(name: &str) -> Self {
+        match name.to_ascii_lowercase().as_str() {
+            "yellow" => Self::Yellow,
+            "blue" => Self::Blue,
+            "black" => Self::Black,
+            _ => Self::Red,
+        }
+    }
+
+    /// 四色轮换
+    pub fn next(self) -> Self {
+        match self {
+            Self::Red => Self::Yellow,
+            Self::Yellow => Self::Blue,
+            Self::Blue => Self::Black,
+            Self::Black => Self::Red,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,12 +88,19 @@ impl AnnotationLayer {
         self.items.pop().is_some()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.items.len()
+    }
+
+    /// 按叠加顺序遍历标注（供屏幕实时绘制）
+    pub fn items(&self) -> &[Annotation] {
+        &self.items
     }
 
     /// 全量渲染到帧
@@ -122,9 +149,10 @@ fn draw_line_1px(frame: &mut Frame, a: (i32, i32), b: (i32, i32), rgb: [u8; 3]) 
     let put = |frame: &mut Frame, x: i32, y: i32| {
         if x >= 0 && x < w && y >= 0 && y < h {
             let i = (y * w + x) as usize * 4;
-            frame.data[i] = rgb[0];
+            // Frame 为 BGRA，按 B/G/R 写入
+            frame.data[i] = rgb[2];
             frame.data[i + 1] = rgb[1];
-            frame.data[i + 2] = rgb[2];
+            frame.data[i + 2] = rgb[0];
         }
     };
     let dx = (b.0 - a.0).abs();
@@ -201,6 +229,14 @@ mod tests {
     }
 
     #[test]
+    fn color_names_and_cycle() {
+        assert_eq!(AnnotateColor::from_name("yellow"), AnnotateColor::Yellow);
+        assert_eq!(AnnotateColor::from_name("unknown"), AnnotateColor::Red);
+        assert_eq!(AnnotateColor::Red.next(), AnnotateColor::Yellow);
+        assert_eq!(AnnotateColor::Black.next(), AnnotateColor::Red);
+    }
+
+    #[test]
     fn undo_pops_last_item() {
         let mut layer = AnnotationLayer::default();
         layer.add(Annotation::Text { x: 0, y: 0, content: "A".into(), color: AnnotateColor::Red });
@@ -223,7 +259,8 @@ mod tests {
         });
         let mut f = frame8();
         layer.render(&mut f);
-        assert_eq!(f.data[(4 * 8) as usize * 4], 0xE5);
+        // BGRA：红色 B=0x35
+        assert_eq!(f.data[(4 * 8) as usize * 4], 0x35);
     }
 
     #[test]
@@ -237,9 +274,9 @@ mod tests {
         let mut f = frame8();
         layer.render(&mut f);
         let top = (1 * 8 + 1) as usize * 4;
-        assert_eq!(f.data[top], 0x1E); // Blue B
+        assert_eq!(f.data[top], 0xE5); // Blue 的 B 通道
         let bottom = (6 * 8 + 6) as usize * 4;
-        assert_eq!(f.data[bottom], 0x1E);
+        assert_eq!(f.data[bottom], 0xE5);
     }
 
     #[test]

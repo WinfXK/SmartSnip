@@ -2,8 +2,8 @@
 //! Email: admin@winfxk.cn  QQ: 2508543202
 //! 创建时间: 2026年11月23日
 //!
-//! 覆盖层渲染辅助：整屏压暗（一次性预计算）、放大镜参数、颜色取样。
-//! 逐帧合成已改为 GDI 位图分层 blit（见 mod.rs WM_PAINT）。
+//! 覆盖层渲染辅助：放大镜参数、颜色取样。
+//! 压暗改为按脏区 AlphaBlend（见 mod.rs WM_PAINT）。
 
 use crate::capture::{Frame, Rect};
 
@@ -17,21 +17,6 @@ pub const MAG_ZOOM: i32 = 8;
 pub const MAG_ORIGIN: (i32, i32) = (8, 8);
 /// 边框厚度
 pub const BORDER_WIDTH: i32 = 2;
-
-/// 整屏压暗（启动时一次性计算，之后仅做 blit）
-pub fn dim_global(frame: &Frame) -> Frame {
-    let mut out = frame.data.clone();
-    for px in out.chunks_exact_mut(4) {
-        px[0] = (px[0] as u32 * 6 / 10) as u8;
-        px[1] = (px[1] as u32 * 6 / 10) as u8;
-        px[2] = (px[2] as u32 * 6 / 10) as u8;
-    }
-    Frame {
-        width: frame.width,
-        height: frame.height,
-        data: out,
-    }
-}
 
 /// 放大镜取样的源区域（以光标为中心）
 pub fn mag_source_rect(cursor: (i32, i32), frame_w: i32, frame_h: i32) -> Rect {
@@ -61,14 +46,6 @@ mod tests {
         let mut f = Frame::new(w, h);
         f.data.iter_mut().for_each(|b| *b = v);
         f
-    }
-
-    #[test]
-    fn dim_global_darkens_everywhere() {
-        let f = make_frame(4, 4, 100);
-        let d = dim_global(&f);
-        assert_eq!(d.data[0], 60);
-        assert_eq!(d.data[d.data.len() - 4], 60);
     }
 
     #[test]

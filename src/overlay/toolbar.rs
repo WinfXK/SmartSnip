@@ -30,9 +30,35 @@ pub mod action {
     pub const PIN: u32 = 2;
     pub const OCR: u32 = 3;
     pub const QR: u32 = 4;
+    pub const ANNOTATE: u32 = 5;
+    /// 标注模式：画笔 / 矩形 / 换色 / 撤销 / 完成
+    pub const PEN: u32 = 10;
+    pub const RECT: u32 = 11;
+    pub const COLOR: u32 = 12;
+    pub const UNDO: u32 = 13;
+    pub const DONE: u32 = 14;
 }
 
-const LABELS: [&str; 4] = ["截图", "贴图", "识文", "二维码"];
+/// 工具条形态
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Main,
+    Annotate,
+}
+
+const MAIN_LABELS: [&str; 5] = ["截图", "贴图", "识文", "二维码", "标注"];
+const ANNOT_LABELS: [&str; 5] = ["画笔", "矩形", "颜色", "撤销", "完成"];
+
+static mut KIND: Kind = Kind::Main;
+
+fn labels() -> &'static [&'static str] {
+    unsafe {
+        match KIND {
+            Kind::Main => &MAIN_LABELS,
+            Kind::Annotate => &ANNOT_LABELS,
+        }
+    }
+}
 const BTN_W: i32 = 56;
 const BTN_H: i32 = 34;
 const PAD: i32 = 6;
@@ -52,12 +78,18 @@ pub struct Toolbar {
 static mut HOVER: i32 = -1;
 
 fn toolbar_size() -> (i32, i32) {
-    (PAD * 2 + BTN_W * LABELS.len() as i32 + GAP * (LABELS.len() as i32 - 1), BTN_H + PAD * 2)
+    let n = labels().len() as i32;
+    (PAD * 2 + BTN_W * n + GAP * (n - 1), BTN_H + PAD * 2)
 }
 
 /// 在选区右下角外侧弹出工具条；越界时翻转到选区内侧/屏幕内侧
-pub fn show(overlay_hwnd: HWND, selection_desktop: Rect) -> Result<HWND, windows::core::Error> {
+pub fn show(
+    overlay_hwnd: HWND,
+    selection_desktop: Rect,
+    kind: Kind,
+) -> Result<HWND, windows::core::Error> {
     unsafe {
+        KIND = kind;
         let hinstance = GetModuleHandleW(None)?;
         let class_name = windows::core::HSTRING::from(CLASS_NAME);
         static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -131,7 +163,7 @@ fn btn_rect(i: i32) -> RECT {
 }
 
 fn btn_from_point(x: i32, y: i32) -> i32 {
-    for i in 0..LABELS.len() as i32 {
+    for i in 0..labels().len() as i32 {
         let r = btn_rect(i);
         if x >= r.left && x < r.right && y >= r.top && y < r.bottom {
             return i;
@@ -141,11 +173,23 @@ fn btn_from_point(x: i32, y: i32) -> i32 {
 }
 
 fn action_for(i: i32) -> u32 {
-    match i {
-        0 => action::SNIP,
-        1 => action::PIN,
-        2 => action::OCR,
-        _ => action::QR,
+    unsafe {
+        match KIND {
+            Kind::Main => match i {
+                0 => action::SNIP,
+                1 => action::PIN,
+                2 => action::OCR,
+                3 => action::QR,
+                _ => action::ANNOTATE,
+            },
+            Kind::Annotate => match i {
+                0 => action::PEN,
+                1 => action::RECT,
+                2 => action::COLOR,
+                3 => action::UNDO,
+                _ => action::DONE,
+            },
+        }
     }
 }
 
@@ -184,7 +228,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 SetTextColor(hdc, TEXT_COLOR);
                 let font = make_font();
                 let old_font = SelectObject(hdc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0));
-                for (i, label) in LABELS.iter().enumerate() {
+                for (i, label) in labels().iter().enumerate() {
                     let r = btn_rect(i as i32);
                     let fill = if HOVER == i as i32 { HOVER_COLOR } else { BTN_COLOR };
                     let brush = CreateSolidBrush(fill);

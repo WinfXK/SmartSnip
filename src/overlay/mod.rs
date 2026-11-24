@@ -13,9 +13,11 @@ use std::sync::Mutex;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleDC, CreateDCW, CreateDIBSection, CreateSolidBrush,
-    DeleteDC, DeleteObject, EndPaint, GetPixel, InvalidateRect, PatBlt, SelectObject, StretchBlt,
-    BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HBRUSH, HBITMAP, HDC, PAINTSTRUCT, SRCCOPY,
+    AlphaBlend, BeginPaint, BitBlt, CreateCompatibleDC, CreateDCW, CreateDIBSection, CreatePen,
+    CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, GetPixel, GetStockObject, InvalidateRect,
+    PatBlt, Polyline, Rectangle, SelectObject, StretchBlt, AC_SRC_OVER, BITMAPINFO,
+    BITMAPINFOHEADER, BLENDFUNCTION, DIB_RGB_COLORS, HBRUSH, HBITMAP, HDC, HOLLOW_BRUSH,
+    PAINTSTRUCT, PS_SOLID, SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus};
@@ -42,11 +44,11 @@ struct OverlayState {
     screen: (i32, i32),
     /// 原图内存 DC（含 DIB 位图）
     src_dc: HDC,
-    /// 压暗底图内存 DC
-    dim_dc: HDC,
     /// 待释放的 GDI 位图
     src_bmp: HBITMAP,
-    dim_bmp: HBITMAP,
+    /// 1x1 纯黑源（压暗用，随脏区拉伸 AlphaBlend）
+    dim_src_dc: HDC,
+    dim_src_bmp: HBITMAP,
     /// 最近一帧光标位置（窗口内物理坐标）
     cursor: (i32, i32),
     /// 拖拽起点（窗口内物理坐标）
@@ -64,6 +66,24 @@ struct OverlayState {
     pending: bool,
     /// 工具条窗口
     toolbar: HWND,
+    /// 标注层（选区局部坐标）
+    annotations: crate::annotate::AnnotationLayer,
+    /// 处于标注模式
+    annotating: bool,
+    /// 当前标注工具
+    annot_tool: AnnotTool,
+    /// 当前标注色
+    annot_color: crate::annotate::AnnotateColor,
+    /// 进行中的标注（实时预览）
+    annot_preview: Option<crate::annotate::Annotation>,
+    /// 上次预览脏区（覆盖层坐标）
+    annot_dirty: Option<Rect>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AnnotTool {
+    Pen,
+    Rect,
 }
 
 static mut STATE: Option<OverlayState> = None;
@@ -102,7 +122,6 @@ pub fn start() -> Result<(), windows::core::Error> {
         let _ = ReleaseCapture();
         let bounds = virtual_desktop_bounds();
         let source = capture_region(bounds)?;
-        let dimmed = render::dim_global(&source);
 
         let hinstance = GetModuleHandleW(None)?;
         let class_name = windows::core::HSTRING::from(CLASS_NAME);
@@ -151,7 +170,28 @@ pub fn start() -> Result<(), windows::core::Error> {
 
         let screen_dc = CreateDCW(windows::core::w!("DISPLAY"), None, None, None);
         let (src_dc, src_bmp) = frame_to_dc(&source, screen_dc);
-        let (dim_dc, dim_bmp) = frame_to_dc(&dimmed, screen_dc);
+        // 1x1 纯黑位图：压暗时按脏区拉伸 AlphaBlend，避免再存一整屏压暗图
+        let (dim_src_dc, dim_src_bmp) = {
+            let mut bi = BITMAPINFO::default();
+            bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+            bi.bmiHeader.biWidth = 1;
+            bi.bmiHeader.biHeight = -1;
+            bi.bmiHeader.biPlanes = 1;
+            bi.bmiHeader.biBitCount = 32;
+            bi.bmiHeader.biCompression = DIB_RGB_COLORS.0;
+            let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+            let bmp = windows::Win32::Graphics::Gdi::CreateDIBSection(
+                screen_dc, &bi, DIB_RGB_COLORS, &mut bits, None, 0,
+            )
+            .unwrap_or_default();
+            if !bits.is_null() {
+                // BGRA = 黑
+                core::ptr::write_bytes(bits as *mut u8, 0, 4);
+            }
+            let dc = CreateCompatibleDC(screen_dc);
+            SelectObject(dc, windows::Win32::Graphics::Gdi::HGDIOBJ(bmp.0));
+            (dc, bmp)
+        };
         // 离屏合成缓冲
         let mut bi = BITMAPINFO::default();
         bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
@@ -181,9 +221,9 @@ pub fn start() -> Result<(), windows::core::Error> {
             ),
             screen: (bounds.width, bounds.height),
             src_dc,
-            dim_dc,
             src_bmp,
-            dim_bmp,
+            dim_src_dc,
+            dim_src_bmp,
             cursor: (
                 pt.x - GetSystemMetrics(SM_XVIRTUALSCREEN),
                 pt.y - GetSystemMetrics(SM_YVIRTUALSCREEN),
@@ -196,6 +236,14 @@ pub fn start() -> Result<(), windows::core::Error> {
             paint_bmp,
             pending: false,
             toolbar: HWND::default(),
+            annotations: crate::annotate::AnnotationLayer::default(),
+            annotating: false,
+            annot_tool: AnnotTool::Pen,
+            annot_color: crate::annotate::AnnotateColor::from_name(
+                &crate::config::runtime().annotate.color,
+            ),
+            annot_preview: None,
+            annot_dirty: None,
         });
     }
     Ok(())
@@ -212,9 +260,9 @@ pub fn take_selection() -> Option<Rect> {
 fn cleanup_gdi(st: &OverlayState) {
     unsafe {
         let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(st.src_bmp.0));
-        let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(st.dim_bmp.0));
+        let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(st.dim_src_bmp.0));
         let _ = DeleteDC(st.src_dc);
-        let _ = DeleteDC(st.dim_dc);
+        let _ = DeleteDC(st.dim_src_dc);
         let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(st.paint_bmp.0));
         let _ = DeleteDC(st.paint_dc);
     }
@@ -293,8 +341,38 @@ unsafe fn paint(hdc: HDC, rc: &RECT) {
         width: rc.right - rc.left,
         height: rc.bottom - rc.top,
     };
-    // 1. 压暗底图
-    let _ = BitBlt(hdc, dirty.x, dirty.y, dirty.width, dirty.height, st.dim_dc, dirty.x, dirty.y, SRCCOPY);
+    // 1. 脏区先铺原图
+    let _ = BitBlt(
+        hdc,
+        dirty.x,
+        dirty.y,
+        dirty.width,
+        dirty.height,
+        st.src_dc,
+        dirty.x,
+        dirty.y,
+        SRCCOPY,
+    );
+    // 2. 再叠 50% 黑压暗（1x1 源拉伸，省去整屏压暗位图）
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: 128,
+        AlphaFormat: 0,
+    };
+    let _ = AlphaBlend(
+        hdc,
+        dirty.x,
+        dirty.y,
+        dirty.width,
+        dirty.height,
+        st.dim_src_dc,
+        0,
+        0,
+        1,
+        1,
+        blend,
+    );
     // 2. 选区内还原原图
     if let Some(sel) = st.selection {
         let ix0 = sel.x.max(dirty.x);
@@ -309,8 +387,18 @@ unsafe fn paint(hdc: HDC, rc: &RECT) {
         let outer = border_rect(sel);
         pat_blt_frame(hdc, &outer, &sel, brush);
         let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(brush.0));
+        // 3.5 标注（选区局部坐标 → 屏幕偏移）
+        for item in st.annotations.items() {
+            draw_annotation(hdc, item, sel.x, sel.y);
+        }
+        if let Some(preview) = st.annot_preview.as_ref() {
+            draw_annotation(hdc, preview, sel.x, sel.y);
+        }
     }
-    // 4. 放大镜（GDI 拉伸，无 CPU 逐像素）
+    // 4. 放大镜（标注模式下隐藏，避免遮挡绘制）
+    if st.annotating {
+        return;
+    }
     let mag = mag_rect();
     let src = render::mag_source_rect(st.cursor, st.screen.0, st.screen.1);
     let brush = border_brush();
@@ -328,6 +416,111 @@ unsafe fn paint(hdc: HDC, rc: &RECT) {
     pat_rect(hdc, &Rect { x: mag.x + mag.width - 2, y: mag.y, width: 2, height: mag.height }, brush);
     SelectObject(hdc, old);
     let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(brush.0));
+}
+
+/// 将一条标注绘制到屏幕 DC（局部坐标 + 选区偏移）
+unsafe fn draw_annotation(hdc: HDC, a: &crate::annotate::Annotation, ox: i32, oy: i32) {
+    use crate::annotate::{AnnotateColor, Annotation};
+    use windows::Win32::Graphics::Gdi::HGDIOBJ;
+
+    let colorref = |c: AnnotateColor| {
+        let [r, g, b] = c.rgb();
+        COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
+    };
+    match a {
+        Annotation::Pen { points, color, width } => {
+            let Some(&first) = points.first() else { return };
+            let pts: Vec<POINT> = points
+                .iter()
+                .map(|&(x, y)| POINT { x: x + ox, y: y + oy })
+                .collect();
+            let pen = CreatePen(PS_SOLID, (*width).max(1), colorref(*color));
+            let old = SelectObject(hdc, HGDIOBJ(pen.0));
+            if pts.len() == 1 {
+                let _ = Rectangle(
+                    hdc,
+                    first.0 + ox,
+                    first.1 + oy,
+                    first.0 + ox + 1,
+                    first.1 + oy + 1,
+                );
+            } else {
+                let _ = Polyline(hdc, &pts);
+            }
+            SelectObject(hdc, old);
+            let _ = DeleteObject(HGDIOBJ(pen.0));
+        }
+        Annotation::Rect { x0, y0, x1, y1, color, width } => {
+            let pen = CreatePen(PS_SOLID, (*width).max(1), colorref(*color));
+            let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+            let old_brush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+            let _ = Rectangle(hdc, *x0 + ox, *y0 + oy, *x1 + ox, *y1 + oy);
+            SelectObject(hdc, old_brush);
+            SelectObject(hdc, old_pen);
+            let _ = DeleteObject(HGDIOBJ(pen.0));
+        }
+        Annotation::Text { .. } => {}
+    }
+}
+
+/// 标注在选区局部坐标下的包围盒（用于精确重绘）
+fn annotation_bounds(a: &crate::annotate::Annotation) -> Option<Rect> {
+    use crate::annotate::Annotation;
+    match a {
+        Annotation::Pen { points, width, .. } => {
+            let first = points.first().copied()?;
+            let (mut x0, mut y0, mut x1, mut y1) = (first.0, first.1, first.0, first.1);
+            for &(x, y) in points {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+            let pad = (*width).max(1);
+            Some(Rect {
+                x: x0 - pad,
+                y: y0 - pad,
+                width: (x1 - x0) + pad * 2,
+                height: (y1 - y0) + pad * 2,
+            })
+        }
+        Annotation::Rect { x0, y0, x1, y1, width, .. } => {
+            let pad = (*width).max(1);
+            let (left, right) = ((*x0).min(*x1), (*x0).max(*x1));
+            let (top, bottom) = ((*y0).min(*y1), (*y0).max(*y1));
+            Some(Rect {
+                x: left - pad,
+                y: top - pad,
+                width: (right - left) + pad * 2,
+                height: (bottom - top) + pad * 2,
+            })
+        }
+        Annotation::Text { .. } => None,
+    }
+}
+
+/// 屏幕坐标 → 选区局部坐标（越界返回 None）
+fn local_point(st: &OverlayState, x: i32, y: i32) -> Option<(i32, i32)> {
+    let sel = st.selection?;
+    let lx = x - sel.x;
+    let ly = y - sel.y;
+    if lx >= 0 && ly >= 0 && lx < sel.width && ly < sel.height {
+        Some((lx, ly))
+    } else {
+        None
+    }
+}
+
+/// 预览标注的屏幕坐标包围盒
+fn preview_bounds(st: &OverlayState) -> Option<Rect> {
+    let sel = st.selection?;
+    let b = annotation_bounds(st.annot_preview.as_ref()?)?;
+    Some(Rect {
+        x: b.x + sel.x,
+        y: b.y + sel.y,
+        width: b.width,
+        height: b.height,
+    })
 }
 
 fn border_brush() -> HBRUSH {
@@ -362,6 +555,78 @@ unsafe fn pat_rect(hdc: HDC, r: &Rect, brush: HBRUSH) {
     SelectObject(hdc, old);
 }
 
+/// 选区的桌面坐标
+fn selection_desktop(st: &OverlayState) -> Option<Rect> {
+    let sel = st.selection?;
+    Some(Rect {
+        x: sel.x + st.origin.0,
+        y: sel.y + st.origin.1,
+        width: sel.width,
+        height: sel.height,
+    })
+}
+
+/// 进入标注模式：切换为标注工具条
+unsafe fn enter_annotate_mode(hwnd: HWND) {
+    let Some(st) = STATE.as_mut() else { return };
+    let Some(sel_desktop) = selection_desktop(st) else { return };
+    st.annotating = true;
+    st.annot_preview = None;
+    st.annot_dirty = None;
+    toolbar::destroy(st.toolbar);
+    match toolbar::show(hwnd, sel_desktop, toolbar::Kind::Annotate) {
+        Ok(tb) => st.toolbar = tb,
+        Err(err) => crate::logging::error(&format!("标注工具条创建失败: {err}")),
+    }
+}
+
+/// 退出标注模式：恢复主工具条并重绘选区
+unsafe fn leave_annotate_mode(hwnd: HWND) {
+    let Some(st) = STATE.as_mut() else { return };
+    st.annotating = false;
+    st.annot_preview = None;
+    st.annot_dirty = None;
+    toolbar::destroy(st.toolbar);
+    st.toolbar = HWND::default();
+    if let Some(sel_desktop) = selection_desktop(st) {
+        if let Ok(tb) = toolbar::show(hwnd, sel_desktop, toolbar::Kind::Main) {
+            st.toolbar = tb;
+        }
+    }
+    if let Some(sel) = st.selection {
+        let _ = InvalidateRect(hwnd, Some(&sel.to_win32()), false);
+    }
+}
+
+/// 处理标注模式下的工具条动作；返回 true 表示已消费
+unsafe fn handle_annotate_action(hwnd: HWND, action: u32) -> bool {
+    let Some(st) = STATE.as_mut() else { return false };
+    match action {
+        toolbar::action::PEN => st.annot_tool = AnnotTool::Pen,
+        toolbar::action::RECT => st.annot_tool = AnnotTool::Rect,
+        toolbar::action::COLOR => st.annot_color = st.annot_color.next(),
+        toolbar::action::UNDO => {
+            st.annotations.undo();
+            if let Some(sel) = st.selection {
+                let _ = InvalidateRect(hwnd, Some(&sel.to_win32()), false);
+            }
+        }
+        toolbar::action::DONE => leave_annotate_mode(hwnd),
+        _ => return false,
+    }
+    true
+}
+
+/// 抓取选区并叠加标注
+unsafe fn capture_annotated(
+    st: &OverlayState,
+    desktop: Rect,
+) -> windows::core::Result<crate::capture::Frame> {
+    let mut frame = capture_region(desktop)?;
+    st.annotations.render(&mut frame);
+    Ok(frame)
+}
+
 /// 工具条动作：以当前选区执行 截图/贴图/OCR/二维码
 unsafe fn handle_toolbar_action(hwnd: HWND, action: u32) {
     let Some(st) = STATE.as_ref() else {
@@ -380,7 +645,7 @@ unsafe fn handle_toolbar_action(hwnd: HWND, action: u32) {
     };
     match action {
         toolbar::action::SNIP => {
-            match capture_region(desktop) {
+            match capture_annotated(st, desktop) {
                 Ok(frame) => {
                     if let Err(err) = crate::clipboard::copy_frame(&frame) {
                         crate::logging::error(&err);
@@ -393,7 +658,7 @@ unsafe fn handle_toolbar_action(hwnd: HWND, action: u32) {
             finish(hwnd);
         }
         toolbar::action::PIN => {
-            match capture_region(desktop) {
+            match capture_annotated(st, desktop) {
                 Ok(frame) => {
                     match crate::pin::create(frame, (desktop.x, desktop.y)) {
                         Ok(_) => crate::logging::info("贴图已创建"),
@@ -405,7 +670,7 @@ unsafe fn handle_toolbar_action(hwnd: HWND, action: u32) {
             finish(hwnd);
         }
         toolbar::action::OCR => {
-            match capture_region(desktop) {
+            match capture_annotated(st, desktop) {
                 Ok(frame) => {
                     // 后台识别，10s 硬超时；完成后主窗口弹结果
                     let main = crate::app::main_hwnd();
@@ -432,7 +697,7 @@ unsafe fn handle_toolbar_action(hwnd: HWND, action: u32) {
             finish(hwnd);
         }
         toolbar::action::QR => {
-            match capture_region(desktop) {
+            match capture_annotated(st, desktop) {
                 Ok(frame) => match crate::qrcode::decode(&frame) {
                     Some(crate::qrcode::QrContent::Text(text)) => {
                         let _ = crate::clipboard::copy_text(&text);
@@ -524,9 +789,40 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             WM_LBUTTONDOWN => {
                 let (x, y) = unpack_xy(lparam);
                 if let Some(st) = STATE.as_mut() {
+                    if st.annotating {
+                        if let Some((lx, ly)) = local_point(st, x, y) {
+                            use crate::annotate::Annotation;
+                            let color = st.annot_color;
+                            st.annot_preview = Some(match st.annot_tool {
+                                AnnotTool::Pen => Annotation::Pen {
+                                    points: vec![(lx, ly)],
+                                    color,
+                                    width: 3,
+                                },
+                                AnnotTool::Rect => Annotation::Rect {
+                                    x0: lx,
+                                    y0: ly,
+                                    x1: lx,
+                                    y1: ly,
+                                    color,
+                                    width: 2,
+                                },
+                            });
+                            st.annot_dirty = preview_bounds(st);
+                            if let Some(d) = st.annot_dirty {
+                                let _ = InvalidateRect(st.hwnd, Some(&d.to_win32()), false);
+                            }
+                            let _ = SetCapture(hwnd);
+                        }
+                        return LRESULT(0);
+                    }
                     if st.pending {
-                        // 重新框选：收起工具条
+                        // 重新框选：收起工具条并清空上一轮标注
                         st.pending = false;
+                        st.annotating = false;
+                        st.annot_preview = None;
+                        st.annot_dirty = None;
+                        st.annotations = crate::annotate::AnnotationLayer::default();
                         toolbar::destroy(st.toolbar);
                         st.toolbar = HWND::default();
                         st.selection = None;
@@ -542,6 +838,36 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let (x, y) = unpack_xy(lparam);
                 if let Some(st) = STATE.as_mut() {
                     st.cursor = (x, y);
+                    if st.annotating && st.annot_preview.is_some() {
+                        if let Some((lx, ly)) = local_point(st, x, y) {
+                            use crate::annotate::Annotation;
+                            if let Some(preview) = st.annot_preview.as_mut() {
+                                match preview {
+                                    Annotation::Pen { points, .. } => {
+                                        if points.last() != Some(&(lx, ly)) {
+                                            points.push((lx, ly));
+                                        }
+                                    }
+                                    Annotation::Rect { x1, y1, .. } => {
+                                        *x1 = lx;
+                                        *y1 = ly;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let old = st.annot_dirty;
+                            let new = preview_bounds(st);
+                            let dirty = match (old, new) {
+                                (Some(a), Some(b)) => Some(union(a, b)),
+                                (a, b) => a.or(b),
+                            };
+                            if let Some(d) = dirty {
+                                let _ = InvalidateRect(st.hwnd, Some(&d.to_win32()), false);
+                            }
+                            st.annot_dirty = new;
+                        }
+                        return LRESULT(0);
+                    }
                     // 选区只在按住拖拽期间更新；pending 态（已松开）不跟随鼠标
                     if !st.pending {
                         if let Some((sx, sy)) = st.drag_start {
@@ -558,6 +884,19 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
+                if let Some(st) = STATE.as_mut() {
+                    if st.annotating {
+                        if let Some(item) = st.annot_preview.take() {
+                            st.annotations.add(item);
+                        }
+                        let _ = ReleaseCapture();
+                        st.annot_dirty = None;
+                        if let Some(sel) = st.selection {
+                            let _ = InvalidateRect(st.hwnd, Some(&sel.to_win32()), false);
+                        }
+                        return LRESULT(0);
+                    }
+                }
                 let confirmed = STATE
                     .as_ref()
                     .is_some_and(|st| st.drag_start.is_some() && st.selection.is_some());
@@ -583,7 +922,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         }
                     });
                     if let Some(sel_desktop) = sel_desktop {
-                        match toolbar::show(hwnd, sel_desktop) {
+                        match toolbar::show(hwnd, sel_desktop, toolbar::Kind::Main) {
                             Ok(tb) => {
                                 crate::logging::info("遮罩: 工具条已弹出");
                                 if let Some(st) = STATE.as_mut() {
@@ -599,9 +938,15 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 LRESULT(0)
             }
             WM_RBUTTONUP | WM_KEYDOWN => {
-                // 右键 / ESC 取消
-                if msg == WM_KEYDOWN && wparam.0 as u32 != 0x1B {
-                    return LRESULT(0);
+                // 右键 / ESC 取消；标注模式下 ESC 先退回主工具条
+                if msg == WM_KEYDOWN {
+                    if wparam.0 as u32 != 0x1B {
+                        return LRESULT(0);
+                    }
+                    if STATE.as_ref().is_some_and(|s| s.annotating) {
+                        leave_annotate_mode(hwnd);
+                        return LRESULT(0);
+                    }
                 }
                 finish(hwnd);
                 LRESULT(0)
@@ -645,8 +990,13 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 LRESULT(1)
             }
             crate::app::TOOLBAR_ACTION => {
-                crate::logging::info(&format!("遮罩: 收到工具条动作 {action}", action = wparam.0));
-                handle_toolbar_action(hwnd, wparam.0 as u32);
+                let action = wparam.0 as u32;
+                crate::logging::info(&format!("遮罩: 收到工具条动作 {action}"));
+                if action == toolbar::action::ANNOTATE {
+                    enter_annotate_mode(hwnd);
+                } else if !handle_annotate_action(hwnd, action) {
+                    handle_toolbar_action(hwnd, action);
+                }
                 LRESULT(0)
             }
             WM_DESTROY => {

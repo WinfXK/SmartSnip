@@ -13,7 +13,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, RegisterClassW,
-    TranslateMessage, CW_USEDEFAULT, DestroyWindow, MSG, WINDOW_EX_STYLE, WINDOW_STYLE,
+    TranslateMessage, DestroyWindow, MSG, WINDOW_EX_STYLE, WINDOW_STYLE,
     WM_DESTROY, WM_HOTKEY, WM_CLOSE, WNDCLASSW,
 };
 
@@ -72,6 +72,28 @@ fn register_startup_hotkey(hwnd: HWND) {
 
 static HOTKEY_HANDLE: std::sync::Mutex<Option<crate::hotkey::RegisteredHotKey>> =
     std::sync::Mutex::new(None);
+
+/// 暂停全局热键（设置窗口录制组合键时避免误触发）
+pub fn suspend_hotkey() {
+    let mut guard = HOTKEY_HANDLE.lock().unwrap_or_else(|p| p.into_inner());
+    // 取出即 Drop，注销注册
+    let _ = guard.take();
+}
+
+/// 按当前配置恢复全局热键
+pub fn resume_hotkey() {
+    let mut guard = HOTKEY_HANDLE.lock().unwrap_or_else(|p| p.into_inner());
+    if guard.is_none() {
+        let cfg = crate::config::runtime();
+        let combo = crate::hotkey::HotKeyCombo {
+            modifiers: cfg.hotkey.modifiers.clone(),
+            key: cfg.hotkey.key.clone(),
+        };
+        if let Ok(hk) = crate::hotkey::RegisteredHotKey::register(main_hwnd(), &combo) {
+            *guard = Some(hk);
+        }
+    }
+}
 
 /// 换绑全局截图热键；成功后新组合即时生效
 pub fn rebind_hotkey(

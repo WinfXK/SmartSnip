@@ -335,7 +335,8 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             WM_MOUSEWHEEL => {
                 let st = state_from(hwnd);
                 if !st.is_null() {
-                    let ctrl = wparam.0 & (0x0008 << 16) != 0; // MK_CONTROL
+                    // wParam 低字为按键状态，高位字为滚轮增量
+                    let ctrl = wparam.0 & 0x0008 != 0; // MK_CONTROL
                     let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
                     if ctrl {
                         let step = if delta > 0 { 16 } else { -16 };

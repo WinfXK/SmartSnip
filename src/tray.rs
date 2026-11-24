@@ -75,7 +75,7 @@ pub fn notify(title: &str, message: &str) {
 pub fn shutdown() {
     unsafe {
         if let Some(mut nid) = NOTIFY_ICON.take() {
-            Shell_NotifyIconW(NIM_DELETE, &mut nid);
+            let _ = Shell_NotifyIconW(NIM_DELETE, &mut nid);
         }
     }
 }

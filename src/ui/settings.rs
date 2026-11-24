@@ -41,15 +41,11 @@ const COLOR_LABELS: [&str; 4] = ["红", "黄", "蓝", "黑"];
 
 struct Controls {
     hotkey_edit: HWND,
-    hotkey_record: HWND,
     pin_max: HWND,
     pin_opacity: HWND,
     blur: HWND,
     autostart: HWND,
     color: HWND,
-    save: HWND,
-    cancel: HWND,
-    open_dir: HWND,
 }
 
 struct SettingsState {
@@ -58,6 +54,8 @@ struct SettingsState {
     ctl: Controls,
     recording: bool,
     recorded: Option<HotKeyCombo>,
+    /// 录制期间已暂停全局热键
+    suspended: bool,
 }
 
 static mut SETTINGS: Option<SettingsState> = None;
@@ -90,7 +88,7 @@ pub fn show() {
         }
         let sw = GetSystemMetrics(SM_CXSCREEN);
         let sh = GetSystemMetrics(SM_CYSCREEN);
-        let (w, h) = (430, 336);
+        let (w, h) = (440, 380);
         let hwnd = match CreateWindowExW(
             WINDOW_EX_STYLE(0),
             PCWSTR(class_name.as_ptr()),
@@ -119,6 +117,7 @@ pub fn show() {
             ctl,
             recording: false,
             recorded: None,
+            suspended: false,
         });
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
@@ -212,7 +211,7 @@ unsafe fn create_controls(hwnd: HWND, hinst: HINSTANCE) -> Controls {
         hinst,
     );
     all.push(rec);
-    let hint = HSTRING::from("录制时按下组合键；需至少一个 Ctrl/Alt/Shift/Win 修饰键");
+    let hint = HSTRING::from("按下组合键，需含 Ctrl/Alt/Shift/Win");
     let h = ctrl(
         hwnd,
         pcw(&static_c),
@@ -351,15 +350,11 @@ unsafe fn create_controls(hwnd: HWND, hinst: HINSTANCE) -> Controls {
     }
     Controls {
         hotkey_edit: edit,
-        hotkey_record: rec,
         pin_max: pmax,
         pin_opacity: pop,
         blur,
         autostart: auto,
         color,
-        save,
-        cancel,
-        open_dir: open,
     }
 }
 
@@ -548,8 +543,21 @@ fn start_recording(hwnd: HWND) {
         let Some(st) = SETTINGS.as_mut() else { return };
         st.recording = true;
         st.recorded = None;
+        if !st.suspended {
+            crate::app::suspend_hotkey();
+            st.suspended = true;
+        }
         set_text(st.ctl.hotkey_edit, "请按下组合键…");
         let _ = SetFocus(hwnd);
+    }
+}
+
+/// 结束录制并恢复全局热键
+fn end_recording(st: &mut SettingsState) {
+    st.recording = false;
+    if st.suspended {
+        crate::app::resume_hotkey();
+        st.suspended = false;
     }
 }
 
@@ -583,7 +591,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let vk = wparam.0 as u32;
                 if vk == 0x1B {
                     // ESC 取消录制
-                    st.recording = false;
+                    end_recording(st);
                     set_text(st.ctl.hotkey_edit, &combo_display(&st.cfg.hotkey_combo()));
                     return LRESULT(0);
                 }
@@ -592,7 +600,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 }
                 match capture_combo(vk) {
                     Some(combo) => {
-                        st.recording = false;
+                        end_recording(st);
                         st.recorded = Some(combo.clone());
                         set_text(st.ctl.hotkey_edit, &combo_display(&combo));
                     }
@@ -605,6 +613,11 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 LRESULT(0)
             }
             WM_DESTROY => {
+                if let Some(st) = SETTINGS.as_mut() {
+                    if st.suspended {
+                        crate::app::resume_hotkey();
+                    }
+                }
                 SETTINGS = None;
                 LRESULT(0)
             }
