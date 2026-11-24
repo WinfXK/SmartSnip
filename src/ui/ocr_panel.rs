@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, LoadCursorW,
     RegisterClassW, SetCursor, ShowWindow,
     HWND_TOPMOST, IDC_ARROW, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNOACTIVATE,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_PAINT,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CREATE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_PAINT,
     WM_SETCURSOR, WNDCLASSW,
 };
 
@@ -76,7 +76,7 @@ pub fn show(lines: Vec<String>, near: (i32, i32)) -> Result<HWND, windows::core:
             WINDOW_EX_STYLE(0x0000_0008 | 0x0000_0080), // WS_EX_TOPMOST | WS_EX_TOOLWINDOW
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::w!(""),
-            WINDOW_STYLE(0x1000_0000), // WS_VISIBLE（避开 WS_POPUP 强制最大化怪癖）
+            WINDOW_STYLE(0x8000_0000 | 0x1000_0000), // WS_POPUP | WS_VISIBLE
             x,
             y,
             PANEL_W,
@@ -232,13 +232,6 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     }
                 }
                 LRESULT(0)
-            }
-            windows::Win32::UI::WindowsAndMessaging::WM_NCCALCSIZE => {
-                if wparam.0 != 0 {
-                    LRESULT(0)
-                } else {
-                    DefWindowProcW(hwnd, msg, wparam, lparam)
-                }
             }
             WM_ERASEBKGND => LRESULT(1),
             WM_SETCURSOR => {

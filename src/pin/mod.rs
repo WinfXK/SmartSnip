@@ -16,10 +16,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GetCursorPos,
-    GetSystemMetrics, LoadCursorW, PostMessageW, RegisterClassW, SetCursor, SetLayeredWindowAttributes, AppendMenuW,
-    TrackPopupMenu, SM_CXSCREEN, SM_CYSCREEN, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
-    WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEWHEEL, WM_PAINT,
-    WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW,
+    LoadCursorW, PostMessageW, RegisterClassW, SetCursor, SetLayeredWindowAttributes, AppendMenuW,
+    TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW,
 };
 
 use windows::Win32::Graphics::Gdi::PATCOPY;
@@ -38,7 +37,6 @@ const MAX_SCALE_X100: i32 = 500;
 static PIN_COUNT: AtomicU32 = AtomicU32::new(0);
 /// 存活贴图句柄表（遮罩启动时对其压序）
 static PIN_REGISTRY: Mutex<Vec<isize>> = Mutex::new(Vec::new());
-static mut PIN_SEQ: u32 = 0;
 
 /// 单张贴图状态（UI 线程访问）
 struct PinState {
@@ -81,7 +79,6 @@ pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::cor
             REGISTERED.set(()).ok();
         }
 
-        PIN_SEQ += 1;
         let state = Box::into_raw(Box::new(PinState {
             frame,
             scale_x100: 100,
@@ -89,88 +86,34 @@ pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::cor
             drag_offset: None,
         }));
 
+        let w = (*state).frame.width as i32;
+        let h = (*state).frame.height as i32;
+        // WS_POPUP：无系统标题栏/边框，客户区即整窗，鼠标拖动由本窗口手动实现
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0x0000_0008 | 0x0000_0080), // WS_EX_TOPMOST | WS_EX_TOOLWINDOW
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::w!("SmartSnip Pin"),
-            WINDOW_STYLE(0x1000_0000), // WS_VISIBLE（本构建对可见 WS_POPUP 强加 WS_MAXIMIZE，禁用拖动；改用普通窗口形态）
+            WINDOW_STYLE(0x8000_0000 | 0x1000_0000), // WS_POPUP | WS_VISIBLE
             screen_pos.0,
             screen_pos.1,
-            (*state).frame.width as i32,
-            (*state).frame.height as i32,
+            w,
+            h,
             None,
             None,
             windows::Win32::Foundation::HINSTANCE(hinstance.0),
             Some(state.cast()),
         )?;
-        {
-            let mut si = windows::Win32::System::Threading::STARTUPINFOW::default();
-            windows::Win32::System::Threading::GetStartupInfoW(&mut si);
-            crate::logging::info(&format!(
-                "startupinfo showWindow={} flags={}",
-                si.wShowWindow, si.dwFlags.0
-            ));
-        }
         PIN_COUNT.fetch_add(1, Ordering::Relaxed);
-        // 登记存活贴图，供遮罩启动时压序
         PIN_REGISTRY.lock().unwrap_or_else(|p| p.into_inner()).push(hwnd.0 as isize);
-        crate::logging::info(&format!(
-            "bisect-registry style=0x{:X}",
-            windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
-                hwnd,
-                windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-16)
-            )
-        ));
         let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
             hwnd,
             windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST,
-            0, 0, 0, 0,
-            windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(0x0001 | 0x0002), // NOSIZE | NOMOVE
-        );
-
-        crate::logging::info(&format!(
-            "bisect-show style=0x{:X}",
-            windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
-                hwnd,
-                windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-16)
-            )
-        ));
-        // 显示调用后再清一次 WS_MAXIMIZE（显示动作可能重新套用启动信息状态），
-        // 并按预期几何复位，防止最大化几何污染命中测试
-        // 复位窗口 placement（最大化状态会让系统忽略 HTCAPTION 拖动）
-        let mut wp = windows::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT::default();
-        wp.length = std::mem::size_of::<windows::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT>()
-            as u32;
-        let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowPlacement(hwnd, &mut wp);
-        wp.showCmd = 1;
-        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPlacement(hwnd, &wp);
-        let cur_style = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
-            hwnd,
-            windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-16),
-        );
-        windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
-            hwnd,
-            windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-16),
-            cur_style & !0x0100_0000,
-        );
-        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
-            hwnd,
-            windows::Win32::UI::WindowsAndMessaging::HWND_TOP,
             screen_pos.0,
             screen_pos.1,
-            (*state).frame.width as i32,
-            (*state).frame.height as i32,
-            windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(
-                0x0004 | 0x0010 | 0x0020, // NOZORDER | NOACTIVATE | FRAMECHANGED
-            ),
+            w,
+            h,
+            windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(0x0010), // NOACTIVATE
         );
-        crate::logging::info(&format!(
-            "bisect-placement style=0x{:X}",
-            windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
-                hwnd,
-                windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-16)
-            )
-        ));
         Ok(hwnd)
     }
 }
@@ -200,19 +143,6 @@ pub fn send_all_below(above: HWND) {
     }
 }
 
-/// 遮罩会话期间禁用所有贴图的鼠标输入（点击穿透到遮罩），结束由 set_all_enabled 恢复
-pub fn set_all_enabled(enabled: bool) {
-    let reg = PIN_REGISTRY.lock().unwrap_or_else(|p| p.into_inner()).clone();
-    for h in reg {
-        unsafe {
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
-                windows::Win32::Foundation::HWND(h as *mut _),
-                enabled,
-            );
-        }
-    }
-}
-
 fn state_from(hwnd: HWND) -> *mut PinState {
     unsafe {
         windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PinState
@@ -232,32 +162,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let create = lparam.0 as *mut windows::Win32::UI::WindowsAndMessaging::CREATESTRUCTW;
                 let state = (*create).lpCreateParams as *mut PinState;
                 windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize);
-                // 剥离启动信息附加的 WS_MAXIMIZE，避免最大化状态毒化命中与拖动
-                (*create).style &= !0x0100_0000;
                 DefWindowProcW(hwnd, msg, wparam, lparam)
-            }
-            windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {
-                // 整窗视为标题栏：拖动由系统原生处理，不依赖自家消息
-                return LRESULT(2); // HTCAPTION
-            }
-            windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {
-                let r = DefWindowProcW(hwnd, msg, wparam, lparam);
-                crate::logging::info(&format!("贴图: nchittest={:#X}", r.0));
-                // 命中客户区时按标题栏处理，交给系统原生拖动
-                if r.0 as u32 == 1 {
-                    return LRESULT(2);
-                }
-                r
-            }
-            windows::Win32::UI::WindowsAndMessaging::WM_NCCALCSIZE => {
-                // [实验A] 暂时走默认路径
-                if std::env::var("PIN_KEEP_BORDER").is_ok() {
-                    DefWindowProcW(hwnd, msg, wparam, lparam)
-                } else if wparam.0 != 0 {
-                    LRESULT(0)
-                } else {
-                    DefWindowProcW(hwnd, msg, wparam, lparam)
-                }
             }
             windows::Win32::UI::WindowsAndMessaging::WM_CAPTURECHANGED => {
                 // 捕获被夺走时复位拖动态，防止鼠标事件全部被贴图吞掉
@@ -326,7 +231,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     if let Some((ox, oy)) = (*st).drag_offset {
                         let mut pt = POINT::default();
                         let _ = GetCursorPos(&mut pt);
-                        let ok = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
                             hwnd,
                             None,
                             pt.x - ox,
@@ -337,12 +242,6 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                                 0x0001 | 0x0004 | 0x0010, // NOSIZE | NOZORDER | NOACTIVATE
                             ),
                         );
-                        crate::logging::info(&format!(
-                            "pin move to ({},{}) ok={}",
-                            pt.x - ox,
-                            pt.y - oy,
-                            ok.is_ok()
-                        ));
                     }
                 }
                 LRESULT(0)
@@ -497,11 +396,3 @@ fn SetCapturePin(hwnd: HWND) -> HWND {
     unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(hwnd) }
 }
 
-// 屏幕尺寸保留用于默认落位越界修正（M4 打磨）
-const _: windows::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX = SM_CXSCREEN;
-const _: windows::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX = SM_CYSCREEN;
-
-#[allow(unused)]
-fn _unused_rect(r: RECT) -> RECT {
-    r
-}

@@ -18,13 +18,14 @@ use windows::Win32::Graphics::Gdi::{
     BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HBRUSH, HBITMAP, HDC, PAINTSTRUCT, SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetCapture, ReleaseCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, LoadCursorW, RegisterClassW,
     SetCursor, ShowWindow, HWND_TOPMOST, IDC_CROSS, SW_SHOWNOACTIVATE, SET_WINDOW_POS_FLAGS,
-    SetWindowPos, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    GetSystemMetrics, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_DESTROY, WNDCLASSW,
+    SetWindowPos, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    GetSystemMetrics, SetForegroundWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_DESTROY, WNDCLASSW,
 };
 
 use crate::app::SELECTION_DONE;
@@ -93,6 +94,10 @@ unsafe fn frame_to_dc(frame: &crate::capture::Frame, hdc_screen: HDC) -> (HDC, H
 /// 启动一次框选会话；完成后向主窗口投递 SELECTION_DONE
 pub fn start() -> Result<(), windows::core::Error> {
     unsafe {
+        // 已有遮罩会话时忽略重复触发，避免覆盖 STATE 泄漏窗口
+        if STATE.is_some() {
+            return Ok(());
+        }
         // 同一线程：清除贴图等窗口可能遗留的鼠标捕获，避免遮罩收不到鼠标
         let _ = ReleaseCapture();
         let bounds = virtual_desktop_bounds();
@@ -115,8 +120,8 @@ pub fn start() -> Result<(), windows::core::Error> {
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::w!(""),
             WINDOW_STYLE(0x8000_0000), // WS_POPUP
-            GetSystemMetrics(SM_XVIRTUALSCREEN),
-            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            bounds.x,
+            bounds.y,
             bounds.width,
             bounds.height,
             None,
@@ -127,18 +132,20 @@ pub fn start() -> Result<(), windows::core::Error> {
         SetWindowPos(
             hwnd,
             HWND_TOPMOST,
-            GetSystemMetrics(SM_XVIRTUALSCREEN),
-            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            bounds.x,
+            bounds.y,
             bounds.width,
             bounds.height,
             SET_WINDOW_POS_FLAGS(0x0040), // SWP_SHOWWINDOW
         );
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        // 将所有贴图压到遮罩之下，并禁用其鼠标输入（双保险：点击必达遮罩）
+        // 截图会话需要键盘（ESC/Enter/取色），显式夺取前台与焦点
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetFocus(hwnd);
+        // 新增的顶层置顶窗口已位于所有贴图之上；显式压序作为双保险
         crate::pin::send_all_below(hwnd);
-        crate::pin::set_all_enabled(false);
         crate::logging::info(&format!(
-            "遮罩: 窗口已显示，贴图压序+禁用完成（{} 张）",
+            "遮罩: 窗口已显示，贴图压序完成（{} 张）",
             crate::pin::count()
         ));
 
@@ -516,16 +523,6 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             }
             WM_LBUTTONDOWN => {
                 let (x, y) = unpack_xy(lparam);
-                crate::logging::info(&format!(
-                    "遮罩: 按下 ({x},{y}) pending={} capture={}",
-                    STATE.as_ref().map(|s| s.pending).unwrap_or(false),
-                    {
-                        let mut ti = windows::Win32::UI::WindowsAndMessaging::GUITHREADINFO::default();
-                        ti.cbSize = std::mem::size_of::<windows::Win32::UI::WindowsAndMessaging::GUITHREADINFO>() as u32;
-                        let _ = windows::Win32::UI::WindowsAndMessaging::GetGUIThreadInfo(0, &mut ti);
-                        ti.hwndCapture.0 as usize != 0
-                    }
-                ));
                 if let Some(st) = STATE.as_mut() {
                     if st.pending {
                         // 重新框选：收起工具条
@@ -542,9 +539,6 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
-                if STATE.as_ref().map(|s| !s.first_paint_done).unwrap_or(true) {
-                    crate::logging::info("遮罩: [诊断] 收到移动(首帧前)");
-                }
                 let (x, y) = unpack_xy(lparam);
                 if let Some(st) = STATE.as_mut() {
                     st.cursor = (x, y);
@@ -656,7 +650,6 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 LRESULT(0)
             }
             WM_DESTROY => {
-                crate::pin::set_all_enabled(true);
                 if let Some(st) = STATE.as_ref() {
                     cleanup_gdi(st);
                 }

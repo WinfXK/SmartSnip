@@ -14,9 +14,9 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetSystemMetrics, LoadCursorW,
-    RegisterClassW, SetCursor, SetWindowPos, ShowWindow, HWND_TOPMOST, IDC_HAND, SM_CXSCREEN,
-    SM_CYSCREEN, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ERASEBKGND,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, LoadCursorW, RegisterClassW,
+    SetCursor, ShowWindow, IDC_HAND, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ERASEBKGND,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSW,
 };
 
@@ -74,27 +74,31 @@ pub fn show(overlay_hwnd: HWND, selection_desktop: Rect) -> Result<HWND, windows
         }
         HOVER = -1;
         let (w, h) = toolbar_size();
-        // 右下角外侧 → 向内翻 → 屏幕内
+        // 右下角外侧 → 向内翻 → 虚拟桌面内（跨屏安全）
+        let (sx, sy) = (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+        );
         let (sw, sh) = (
-            GetSystemMetrics(SM_CXSCREEN),
-            GetSystemMetrics(SM_CYSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
         );
         let mut x = selection_desktop.x + selection_desktop.width - w;
         let mut y = selection_desktop.y + selection_desktop.height + 6;
-        if y + h > sh {
-            y = (selection_desktop.y + selection_desktop.height - h - 6).max(0);
+        if y + h > sy + sh {
+            y = selection_desktop.y + selection_desktop.height - h - 6;
         }
-        if x < 0 {
-            x = 0;
+        if x < sx {
+            x = sx;
         }
-        if x + w > sw {
-            x = sw - w;
+        if x + w > sx + sw {
+            x = sx + sw - w;
         }
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0x0000_0008 | 0x0000_0080), // WS_EX_TOPMOST | WS_EX_TOOLWINDOW
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::w!(""),
-            WINDOW_STYLE(0x1000_0000), // WS_VISIBLE（避开 WS_POPUP 强制最大化怪癖）
+            WINDOW_STYLE(0x8000_0000 | 0x1000_0000), // WS_POPUP | WS_VISIBLE（无系统标题栏/边框）
             x,
             y,
             w,
@@ -240,14 +244,6 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     }
                 }
                 LRESULT(0)
-            }
-            windows::Win32::UI::WindowsAndMessaging::WM_NCCALCSIZE => {
-                // 非 POPUP 形态会被系统附加 WS_CAPTION（白条）：客户区=全窗口
-                if wparam.0 != 0 {
-                    LRESULT(0)
-                } else {
-                    DefWindowProcW(hwnd, msg, wparam, lparam)
-                }
             }
             WM_ERASEBKGND => LRESULT(1),
             WM_SETCURSOR => {

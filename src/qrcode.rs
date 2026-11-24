@@ -5,8 +5,6 @@
 //! 二维码识别：rqrr 本地离线解码。
 //! 内容分流：文本 → 直接剪贴板；URL/协议跳转 → 确认后打开；高危 scheme 附风险提示。
 
-use std::os::windows::process::CommandExt;
-
 use rqrr::PreparedImage;
 
 use crate::capture::Frame;
@@ -67,13 +65,29 @@ pub fn is_high_risk(content: &str) -> bool {
     HIGH_RISK_SCHEMES.iter().any(|s| lower.starts_with(s))
 }
 
-/// 确认后打开跳转目标（系统默认方式）
+/// 确认后打开跳转目标（ShellExecute 走系统默认关联，避免 cmd 解析带来的命令注入）
 pub fn open_jump(target: &str) -> std::io::Result<()> {
-    std::process::Command::new("cmd")
-        .args(["/c", "start", "", target])
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-        .spawn()
-        .map(|_| ())
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let op = HSTRING::from("open");
+    let file = HSTRING::from(target);
+    let ret = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(op.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if ret.0 as isize > 32 {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("ShellExecuteW 打开失败"))
+    }
 }
 
 #[cfg(test)]

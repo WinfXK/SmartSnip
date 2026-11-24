@@ -8,8 +8,12 @@
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW, DeleteDC, DeleteObject,
-    GetDIBits, SelectObject, BITMAPINFO, BITMAPINFOHEADER, CAPTUREBLT, DIB_RGB_COLORS,
-    GetDeviceCaps, HBITMAP, HDC, SRCCOPY, HORZRES, VERTRES,
+    GetDIBits, SelectObject, BITMAPINFO, BITMAPINFOHEADER, CAPTUREBLT, DIB_RGB_COLORS, HBITMAP,
+    HDC, SRCCOPY,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN,
 };
 
 /// 物理像素矩形（相对桌面原点）
@@ -114,17 +118,15 @@ unsafe fn capture_region_inner(
     Ok(frame)
 }
 
-/// 虚拟桌面总尺寸（物理像素，跨所有显示器）
+/// 虚拟桌面范围（物理像素，跨所有显示器，含主屏左侧/上方的负坐标）
 pub fn virtual_desktop_bounds() -> Rect {
     unsafe {
-        let dc = CreateDCW(windows::core::w!("DISPLAY"), None, None, None);
-        if dc.is_invalid() {
-            return Rect { x: 0, y: 0, width: 0, height: 0 };
+        Rect {
+            x: GetSystemMetrics(SM_XVIRTUALSCREEN),
+            y: GetSystemMetrics(SM_YVIRTUALSCREEN),
+            width: GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            height: GetSystemMetrics(SM_CYVIRTUALSCREEN),
         }
-        let w = GetDeviceCaps(dc, HORZRES);
-        let h = GetDeviceCaps(dc, VERTRES);
-        let _ = DeleteDC(dc);
-        Rect { x: 0, y: 0, width: w, height: h }
     }
 }
 
