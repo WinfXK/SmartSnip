@@ -92,6 +92,7 @@ impl HotKeyCombo {
 pub struct RegisteredHotKey {
     hwnd: HWND,
     id: u32,
+    combo: HotKeyCombo,
 }
 
 unsafe impl Send for RegisteredHotKey {}
@@ -112,17 +113,29 @@ impl RegisteredHotKey {
                     }
                 })?;
         }
-        Ok(RegisteredHotKey { hwnd, id: HOTKEY_ID_SNIP })
+        Ok(RegisteredHotKey { hwnd, id: HOTKEY_ID_SNIP, combo: combo.clone() })
     }
 
-    /// 换绑：新组合注册成功才注销旧的
+    /// 换绑：先注销旧组合再注册新组合；失败时回滚旧组合
     pub fn rebind(&mut self, combo: &HotKeyCombo) -> Result<(), HotKeyError> {
-        let new = RegisteredHotKey::register(self.hwnd, combo)?;
+        if *combo == self.combo {
+            return Ok(());
+        }
         unsafe {
             let _ = UnregisterHotKey(self.hwnd, self.id as i32);
         }
-        *self = new;
-        Ok(())
+        match RegisteredHotKey::register(self.hwnd, combo) {
+            Ok(new) => {
+                *self = new;
+                Ok(())
+            }
+            Err(err) => {
+                if let Ok(old) = RegisteredHotKey::register(self.hwnd, &self.combo) {
+                    *self = old;
+                }
+                Err(err)
+            }
+        }
     }
 }
 

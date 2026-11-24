@@ -14,6 +14,7 @@ mod capture;
 mod clipboard;
 mod config;
 mod hotkey;
+mod icon;
 mod ocr;
 mod overlay;
 mod pin;

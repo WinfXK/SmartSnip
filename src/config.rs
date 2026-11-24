@@ -71,6 +71,23 @@ impl Default for Config {
     }
 }
 
+/// 进程内生效配置（启动时加载、设置保存后更新）；读取失败回退默认值
+static RUNTIME: Mutex<Option<Config>> = Mutex::new(None);
+
+/// 覆盖进程内生效配置
+pub fn set_runtime(cfg: Config) {
+    *RUNTIME.lock().unwrap_or_else(|p| p.into_inner()) = Some(cfg);
+}
+
+/// 读取当前生效配置（未初始化时返回默认值）
+pub fn runtime() -> Config {
+    RUNTIME
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+        .unwrap_or_default()
+}
+
 /// 配置存储句柄：负责定位目录与读写
 pub struct ConfigStore {
     dir: PathBuf,
@@ -79,11 +96,14 @@ pub struct ConfigStore {
 }
 
 impl ConfigStore {
-    /// 标准安装目录 `C:\Users\{user}\Winfxk\SmartSnip`（exe 名取自自身路径）
+    /// 标准安装目录 `%USERPROFILE%\Winfxk\{exe 名}`（exe 名取自自身路径）
     pub fn standard_dir() -> PathBuf {
         let exe = std::env::current_exe().ok();
-        let user = std::env::var("USERNAME").unwrap_or_default();
-        let mut base = PathBuf::from(format!(r"C:\Users\{user}\Winfxk"));
+        let profile = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("USERNAME").map(|user| format!(r"C:\Users\{user}")))
+            .unwrap_or_default();
+        let mut base = PathBuf::from(profile);
+        base.push("Winfxk");
         let app_name = exe
             .as_ref()
             .and_then(|p| p.file_stem())

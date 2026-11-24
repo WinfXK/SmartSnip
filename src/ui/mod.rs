@@ -3,3 +3,4 @@
 //! 创建时间: 2026年11月23日
 
 pub mod ocr_panel;
+pub mod settings;

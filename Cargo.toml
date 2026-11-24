@@ -44,3 +44,6 @@ opt-level = "s"
 lto = true
 strip = true
 codegen-units = 1
+
+[build-dependencies]
+win-resource-builder = "0.2"

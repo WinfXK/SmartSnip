@@ -53,22 +53,40 @@ const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: DPI_AWARENESS_CONTEXT =
 
 /// 启动时按配置注册截图热键；注册进程生命周期持有
 fn register_startup_hotkey(hwnd: HWND) {
-    let store = crate::config::ConfigStore::new(crate::config::ConfigStore::standard_dir());
-    let cfg = store.load();
+    let cfg = crate::config::runtime();
     let combo = crate::hotkey::HotKeyCombo {
         modifiers: cfg.hotkey.modifiers.clone(),
         key: cfg.hotkey.key.clone(),
     };
     match crate::hotkey::RegisteredHotKey::register(hwnd, &combo) {
         Ok(hk) => {
-            let _ = HOTKEY_HANDLE.set(hk);
+            *HOTKEY_HANDLE.lock().unwrap_or_else(|p| p.into_inner()) = Some(hk);
             crate::logging::info("热键注册成功");
         }
-        Err(err) => crate::logging::error(&format!("热键注册失败({err})，请在设置中更换快捷键")),
+        Err(err) => {
+            crate::logging::error(&format!("热键注册失败({err})，请在设置中更换快捷键"));
+            crate::tray::notify("SmartSnip", &format!("快捷键注册失败：{err}，请在设置中更换"));
+        }
     }
 }
 
-static HOTKEY_HANDLE: OnceLock<crate::hotkey::RegisteredHotKey> = OnceLock::new();
+static HOTKEY_HANDLE: std::sync::Mutex<Option<crate::hotkey::RegisteredHotKey>> =
+    std::sync::Mutex::new(None);
+
+/// 换绑全局截图热键；成功后新组合即时生效
+pub fn rebind_hotkey(
+    combo: &crate::hotkey::HotKeyCombo,
+) -> std::result::Result<(), crate::hotkey::HotKeyError> {
+    let mut guard = HOTKEY_HANDLE.lock().unwrap_or_else(|p| p.into_inner());
+    match guard.as_mut() {
+        Some(hk) => hk.rebind(combo),
+        None => {
+            let hk = crate::hotkey::RegisteredHotKey::register(main_hwnd(), combo)?;
+            *guard = Some(hk);
+            Ok(())
+        }
+    }
+}
 
 pub extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
@@ -153,21 +171,13 @@ fn handle_ocr_result() {
                 .join("\n");
             let _ = crate::clipboard::copy_text(&text);
             crate::logging::info("OCR 完成，全文已入剪贴板");
+            let rows = lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>();
+            let mut pt = windows::Win32::Foundation::POINT::default();
             unsafe {
-                let show = format!(
-                    "识别到 {} 行文本（已复制全文到剪贴板）：\n\n{}",
-                    lines.len(),
-                    text
-                );
-                let text = windows::core::HSTRING::from(show);
-                let title = windows::core::HSTRING::from("文字识别");
-                let _ = windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
-                    main_hwnd(),
-                    windows::core::PCWSTR(text.as_ptr()),
-                    windows::core::PCWSTR(title.as_ptr()),
-                    windows::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION
-                        | windows::Win32::UI::WindowsAndMessaging::MB_TOPMOST,
-                );
+                let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt);
+            }
+            if let Err(err) = crate::ui::ocr_panel::show(rows, (pt.x, pt.y)) {
+                crate::logging::error(&format!("OCR 结果面板创建失败: {err}"));
             }
         }
         Err(err) => crate::logging::error(&format!("OCR 失败: {err}")),
@@ -185,9 +195,11 @@ pub fn run() -> Result<()> {
     unsafe {
         let hinstance = GetModuleHandleW(None)?;
         let class_name = windows::core::HSTRING::from(MAIN_WINDOW_CLASS);
+        let app_icon = crate::icon::app_icon();
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wnd_proc),
             hInstance: hinstance.into(),
+            hIcon: app_icon,
             lpszClassName: windows::core::PCWSTR(class_name.as_ptr()),
             ..Default::default()
         };
@@ -208,6 +220,8 @@ pub fn run() -> Result<()> {
             None,
         )
         ?;        let _ = MAIN_HWND.set(hwnd.0 as isize);
+        let store = crate::config::ConfigStore::new(crate::config::ConfigStore::standard_dir());
+        crate::config::set_runtime(store.load());
         if let Err(err) = crate::tray::init(hwnd) {
             crate::dbg_println!("托盘初始化失败: {err}");
         }

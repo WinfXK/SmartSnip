@@ -28,8 +28,6 @@ use crate::app::{PIN_CLOSED};
 const PATCOPY_PIN: windows::Win32::Graphics::Gdi::ROP_CODE = windows::Win32::Graphics::Gdi::ROP_CODE(PATCOPY.0);
 
 const CLASS_NAME: &str = "SmartSnip_PinWindow";
-/// 贴图数量上限（防失控）
-pub const MAX_PINS: u32 = 20;
 /// 缩放范围
 const MIN_SCALE_X100: i32 = 20;
 const MAX_SCALE_X100: i32 = 500;
@@ -43,10 +41,21 @@ struct PinState {
     frame: Frame,
     /// 缩放百分比
     scale_x100: i32,
-    /// 不透明度 0~255
+    /// 基准不透明度 0~255
     alpha: u8,
+    /// 失焦淡化目标不透明度
+    blur_alpha: u8,
+    /// 失焦淡化开关
+    blur_on_unfocus: bool,
+    /// 是否曾处于激活态（避免首次显示即淡化）
+    was_active: bool,
     /// 拖动中：光标相对窗口左上角的偏移
     drag_offset: Option<(i32, i32)>,
+}
+
+/// 配置上限（1~100），防止失控
+fn max_pins() -> u32 {
+    crate::config::runtime().pin.max_count.clamp(1, 100)
 }
 
 /// 每个窗口对应一份状态，通过 GWLP_USERDATA 关联
@@ -54,13 +63,13 @@ const GWLP_USERDATA: windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_IN
     windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-21);
 
 fn can_create() -> bool {
-    PIN_COUNT.load(Ordering::Relaxed) < MAX_PINS
+    PIN_COUNT.load(Ordering::Relaxed) < max_pins()
 }
 
 /// 创建贴图窗口；`screen_pos` 为桌面物理坐标
 pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::core::Error> {
     if !can_create() {
-        crate::dbg_println!("贴图数量已达上限（{MAX_PINS}）");
+        crate::dbg_println!("贴图数量已达上限（{}）", max_pins());
         return Err(windows::core::Error::from_win32());
     }
     unsafe {
@@ -69,6 +78,7 @@ pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::cor
         static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         if REGISTERED.get().is_none() {
             let wc = WNDCLASSW {
+                style: windows::Win32::UI::WindowsAndMessaging::WNDCLASS_STYLES(0x0008), // CS_DBLCLKS
                 lpfnWndProc: Some(wnd_proc),
                 hInstance: hinstance.into(),
                 hCursor: LoadCursorW(None, windows::Win32::UI::WindowsAndMessaging::IDC_HAND).unwrap_or_default(),
@@ -79,10 +89,16 @@ pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::cor
             REGISTERED.set(()).ok();
         }
 
+        let cfg = crate::config::runtime();
+        let base_alpha = ((cfg.pin.opacity.min(100) as u32) * 255 / 100) as u8;
+        let blur_alpha = ((cfg.pin.blur_opacity.min(100) as u32) * 255 / 100) as u8;
         let state = Box::into_raw(Box::new(PinState {
             frame,
             scale_x100: 100,
-            alpha: 255,
+            alpha: base_alpha,
+            blur_alpha,
+            blur_on_unfocus: cfg.pin.blur_on_unfocus,
+            was_active: false,
             drag_offset: None,
         }));
 
@@ -114,6 +130,9 @@ pub fn create(frame: Frame, screen_pos: (i32, i32)) -> Result<HWND, windows::cor
             h,
             windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(0x0010), // NOACTIVATE
         );
+        if base_alpha < 255 {
+            apply_alpha(hwnd, base_alpha);
+        }
         Ok(hwnd)
     }
 }
@@ -143,6 +162,25 @@ pub fn send_all_below(above: HWND) {
     }
 }
 
+/// 应用窗口整体透明度（按需启用 WS_EX_LAYERED）
+unsafe fn apply_alpha(hwnd: HWND, alpha: u8) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetLayeredWindowAttributes,
+        LAYERED_WINDOW_ATTRIBUTES_FLAGS, WINDOW_LONG_PTR_INDEX,
+    };
+    let ex_index = WINDOW_LONG_PTR_INDEX(-20); // GWL_EXSTYLE
+    let ex = GetWindowLongPtrW(hwnd, ex_index);
+    if ex & 0x0008_0000 == 0 {
+        SetWindowLongPtrW(hwnd, ex_index, ex | 0x0008_0000); // WS_EX_LAYERED
+    }
+    let _ = SetLayeredWindowAttributes(
+        hwnd,
+        COLORREF(0),
+        alpha,
+        LAYERED_WINDOW_ATTRIBUTES_FLAGS(0x0000_0002), // LWA_ALPHA
+    );
+}
+
 fn state_from(hwnd: HWND) -> *mut PinState {
     unsafe {
         windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PinState
@@ -169,6 +207,21 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let st = state_from(hwnd);
                 if !st.is_null() {
                     (*st).drag_offset = None;
+                }
+                LRESULT(0)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_ACTIVATE => {
+                let active = (wparam.0 & 0xFFFF) != 0;
+                let st = state_from(hwnd);
+                if !st.is_null() && (*st).blur_on_unfocus {
+                    if active {
+                        (*st).was_active = true;
+                        apply_alpha(hwnd, (*st).alpha);
+                    } else if (*st).was_active {
+                        apply_alpha(hwnd, (*st).blur_alpha);
+                    }
+                } else if active && !st.is_null() {
+                    (*st).was_active = true;
                 }
                 LRESULT(0)
             }
@@ -209,6 +262,31 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         windows::Win32::Graphics::Gdi::HGDIOBJ(brush.0),
                     );
                     let _ = EndPaint(hwnd, &ps);
+                }
+                LRESULT(0)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDBLCLK => {
+                // 双击还原 1:1，以光标为中心
+                let st = state_from(hwnd);
+                if !st.is_null() {
+                    let mut pt = POINT::default();
+                    let _ = GetCursorPos(&mut pt);
+                    let mut wr = RECT::default();
+                    let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut wr);
+                    let old_w = (wr.right - wr.left).max(1);
+                    let old_h = (wr.bottom - wr.top).max(1);
+                    (*st).scale_x100 = 100;
+                    let w = (*st).frame.width as i32;
+                    let h = (*st).frame.height as i32;
+                    let nx = pt.x - (pt.x - wr.left) * w / old_w;
+                    let ny = pt.y - (pt.y - wr.top) * h / old_h;
+                    let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                        hwnd, None, nx, ny, w, h,
+                        windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(0x0004), // NOZORDER
+                    );
+                    (*st).drag_offset = None;
+                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+                    let _ = InvalidateRect(hwnd, None, false);
                 }
                 LRESULT(0)
             }
@@ -260,43 +338,29 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     let ctrl = wparam.0 & (0x0008 << 16) != 0; // MK_CONTROL
                     let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
                     if ctrl {
-                        // 透明度：首次调整时动态启用 layered
-                        let ex = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
-                            hwnd,
-                            windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-20),
-                        );
-                        if ex & 0x0008_0000 == 0 {
-                            windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
-                                hwnd,
-                                windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX(-20),
-                                ex | 0x0008_0000,
-                            );
-                            SetLayeredWindowAttributes(
-                                hwnd,
-                                COLORREF(0),
-                                (*st).alpha,
-                                windows::Win32::UI::WindowsAndMessaging::LAYERED_WINDOW_ATTRIBUTES_FLAGS(0x0000_0002),
-                            );
-                        }
                         let step = if delta > 0 { 16 } else { -16 };
                         let new = ((*st).alpha as i32 + step).clamp(102, 255); // 40%~100%
                         (*st).alpha = new as u8;
-                        SetLayeredWindowAttributes(
-                            hwnd,
-                            COLORREF(0),
-                            new as u8,
-                            windows::Win32::UI::WindowsAndMessaging::LAYERED_WINDOW_ATTRIBUTES_FLAGS(0x0000_0002),
-                        );
+                        apply_alpha(hwnd, new as u8);
                     } else {
-                        // 缩放
+                        // 以光标为中心缩放
+                        let mut pt = POINT::default();
+                        let _ = GetCursorPos(&mut pt);
+                        let mut wr = RECT::default();
+                        let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut wr);
+                        let old_w = (wr.right - wr.left).max(1);
+                        let old_h = (wr.bottom - wr.top).max(1);
                         let step = if delta > 0 { 10 } else { -10 };
                         (*st).scale_x100 =
                             ((*st).scale_x100 + step).clamp(MIN_SCALE_X100, MAX_SCALE_X100);
                         let disp_w = ((*st).frame.width as i32 * (*st).scale_x100 / 100).max(1);
                         let disp_h = ((*st).frame.height as i32 * (*st).scale_x100 / 100).max(1);
+                        // 保持光标下的图像点不动：按比例移动窗口左上角
+                        let nx = pt.x - (pt.x - wr.left) * disp_w / old_w;
+                        let ny = pt.y - (pt.y - wr.top) * disp_h / old_h;
                         let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
-                            hwnd, None, 0, 0, disp_w, disp_h,
-                            windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(0x0002 | 0x0004), // NOMOVE | NOZORDER
+                            hwnd, None, nx, ny, disp_w, disp_h,
+                            windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(0x0004), // NOZORDER
                         );
                         let _ = InvalidateRect(hwnd, None, false);
                     }

@@ -38,12 +38,19 @@ const ACCENT: COLORREF = COLORREF(0x001E88E5);
 const TEXT: COLORREF = COLORREF(0x00F0F0F0);
 
 static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// 当前面板窗口（单实例，重开先关旧窗）
+static mut PANEL: Option<HWND> = None;
 /// 每行渲染所需高度（WM_PAINT 计算后缓存给命中测试）
 static mut ROW_HEIGHTS: Vec<i32> = Vec::new();
 
 /// 展示识别结果；出现在选区附近
 pub fn show(lines: Vec<String>, near: (i32, i32)) -> Result<HWND, windows::core::Error> {
     unsafe {
+        if let Some(old) = PANEL {
+            if windows::Win32::UI::WindowsAndMessaging::IsWindow(old).as_bool() {
+                let _ = DestroyWindow(old);
+            }
+        }
         *LINES.lock().unwrap_or_else(|p| p.into_inner()) = lines;
         let hinstance = GetModuleHandleW(None)?;
         let class_name = windows::core::HSTRING::from(CLASS_NAME);
@@ -86,6 +93,7 @@ pub fn show(lines: Vec<String>, near: (i32, i32)) -> Result<HWND, windows::core:
             windows::Win32::Foundation::HINSTANCE(hinstance.0),
             None,
         )?;
+        PANEL = Some(hwnd);
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         Ok(hwnd)
     }
@@ -234,6 +242,10 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),
+            windows::Win32::UI::WindowsAndMessaging::WM_DESTROY => {
+                PANEL = None;
+                LRESULT(0)
+            }
             WM_SETCURSOR => {
                 let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
                 SetCursor(cursor);

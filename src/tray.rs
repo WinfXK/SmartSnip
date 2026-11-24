@@ -7,13 +7,13 @@
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::Shell::{
-    NOTIFY_ICON_DATA_FLAGS, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW, Shell_NotifyIconW, NIF_ICON,
-    NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+    NOTIFYICONDATAW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIM_ADD,
+    NIM_DELETE, NIM_MODIFY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW, PostMessageW,
-    SetForegroundWindow, TrackPopupMenu, HMENU, IDI_APPLICATION, MF_CHECKED, MF_STRING,
-    MENU_ITEM_FLAGS, TPM_RIGHTBUTTON, WM_CLOSE, WM_COMMAND, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW, SetForegroundWindow,
+    TrackPopupMenu, HMENU, MF_CHECKED, MF_STRING, MENU_ITEM_FLAGS, TPM_RIGHTBUTTON, WM_CLOSE,
+    WM_COMMAND, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
 };
 
 use crate::app::{ACTIVATE_SNIP, TRAY_CALLBACK};
@@ -32,7 +32,7 @@ static mut NOTIFY_ICON: Option<NOTIFYICONDATAW> = None;
 /// 创建托盘图标并挂接回调消息
 pub fn init(hwnd: HWND) -> Result<(), windows::core::Error> {
     unsafe {
-        let icon = LoadIconW(None, IDI_APPLICATION)?;
+        let icon = crate::icon::app_icon();
         let mut nid = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: hwnd,
@@ -54,6 +54,21 @@ pub fn init(hwnd: HWND) -> Result<(), windows::core::Error> {
         NOTIFY_ICON = Some(nid);
     }
     Ok(())
+}
+
+/// 弹出托盘气泡提示（错误/引导信息，不刷屏由调用方控制）
+pub fn notify(title: &str, message: &str) {
+    unsafe {
+        let Some(mut nid) = NOTIFY_ICON else { return };
+        nid.uFlags = NIF_INFO;
+        for (slot, ch) in nid.szInfoTitle.iter_mut().zip(title.encode_utf16().take(63)) {
+            *slot = ch;
+        }
+        for (slot, ch) in nid.szInfo.iter_mut().zip(message.encode_utf16().take(255)) {
+            *slot = ch;
+        }
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
 }
 
 /// 移除托盘图标（退出前调用）
@@ -93,6 +108,25 @@ pub fn show_context_menu(hwnd: HWND) {
     }
 }
 
+/// 存在存活贴图时的退出确认
+fn confirm_exit(hwnd: HWND) -> bool {
+    unsafe {
+        let text = windows::core::HSTRING::from(format!(
+            "当前还有 {} 张贴图，退出将一并关闭。确定退出？",
+            crate::pin::count()
+        ));
+        let title = windows::core::HSTRING::from("SmartSnip");
+        let result = windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+            hwnd,
+            windows::core::PCWSTR(text.as_ptr()),
+            windows::core::PCWSTR(title.as_ptr()),
+            windows::Win32::UI::WindowsAndMessaging::MB_YESNO
+                | windows::Win32::UI::WindowsAndMessaging::MB_ICONQUESTION,
+        );
+        result.0 == 6 // IDYES
+    }
+}
+
 /// 主窗口 wnd_proc 中转：处理托盘回调与菜单命令；返回 Some 表示已消费
 pub fn handle_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
     if msg == TRAY_CALLBACK {
@@ -114,7 +148,7 @@ pub fn handle_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> O
             menu::SNIP_NOW => unsafe {
                 let _ = PostMessageW(hwnd, ACTIVATE_SNIP, WPARAM(0), LPARAM(0));
             },
-            menu::SETTINGS => crate::dbg_println!("[{}] 打开设置窗口（Task 13 实现）", crate::timefmt::now_cn_string()),
+            menu::SETTINGS => crate::ui::settings::show(),
             menu::OPEN_CONFIG_DIR => {
                 let dir = crate::config::ConfigStore::standard_dir();
                 let _ = std::fs::create_dir_all(&dir);
@@ -130,10 +164,15 @@ pub fn handle_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> O
                     crate::dbg_println!("自启切换失败: {err}");
                 }
             }
-            menu::EXIT => unsafe {
-                shutdown();
-                let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
-            },
+            menu::EXIT => {
+                if crate::pin::count() > 0 && !confirm_exit(hwnd) {
+                    return Some(LRESULT(0));
+                }
+                unsafe {
+                    shutdown();
+                    let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
             _ => {}
         }
         return Some(LRESULT(0));
