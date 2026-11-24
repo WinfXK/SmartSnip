@@ -200,6 +200,19 @@ pub fn send_all_below(above: HWND) {
     }
 }
 
+/// 遮罩会话期间禁用所有贴图的鼠标输入（点击穿透到遮罩），结束由 set_all_enabled 恢复
+pub fn set_all_enabled(enabled: bool) {
+    let reg = PIN_REGISTRY.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    for h in reg {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::EnableWindow(
+                windows::Win32::Foundation::HWND(h as *mut _),
+                enabled,
+            );
+        }
+    }
+}
+
 fn state_from(hwnd: HWND) -> *mut PinState {
     unsafe {
         windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PinState

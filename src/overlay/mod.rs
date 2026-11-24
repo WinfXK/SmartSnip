@@ -134,10 +134,11 @@ pub fn start() -> Result<(), windows::core::Error> {
             SET_WINDOW_POS_FLAGS(0x0040), // SWP_SHOWWINDOW
         );
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        // 将所有贴图压到遮罩之下，保证框选鼠标事件不被贴图截走
+        // 将所有贴图压到遮罩之下，并禁用其鼠标输入（双保险：点击必达遮罩）
         crate::pin::send_all_below(hwnd);
+        crate::pin::set_all_enabled(false);
         crate::logging::info(&format!(
-            "遮罩: 窗口已显示，贴图压序完成（{} 张）",
+            "遮罩: 窗口已显示，贴图压序+禁用完成（{} 张）",
             crate::pin::count()
         ));
 
@@ -643,6 +644,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 LRESULT(0)
             }
             WM_DESTROY => {
+                crate::pin::set_all_enabled(true);
                 if let Some(st) = STATE.as_ref() {
                     cleanup_gdi(st);
                 }
