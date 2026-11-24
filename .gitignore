@@ -1,3 +1,6 @@
 /target
 *.log
 config/logs/
+
+# 本地 Claude Code 指引，不随仓库分发
+/CLAUDE.md
